@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JobPulse Tracker</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <div class="logo">
+                <span class="icon">💼</span>
+                <h1>JobPulse</h1>
+            </div>
+            <button id="logoutBtn" class="logout-btn" style="display: none;">Logout</button>
+        </header>
+
+        <main>
+            <!-- Loading State -->
+            <div id="loadingState" class="state-container" style="display: none;">
+                <div class="spinner"></div>
+                <p>Detecting job...</p>
+            </div>
+
+            <!-- No Job State -->
+            <div id="noJobState" class="state-container" style="display: none;">
+                <div class="icon-large">🔍</div>
+                <h3>No job detected</h3>
+                <p>Navigate to a job page to track it</p>
+            </div>
+
+            <!-- Job Detected State -->
+            <div id="jobDetectedState" class="state-container" style="display: none;">
+                <div class="job-details">
+                    <h2 id="jobTitle" class="job-title">Senior Backend Engineer</h2>
+                    <p id="jobCompany" class="job-company">Acme Technologies</p>
+                    <p id="jobLocation" class="job-location">Bengaluru, India</p>
+                    <span id="jobPlatform" class="job-platform">LinkedIn</span>
+                </div>
+
+                <div id="trackedStatus" style="display: none;" class="tracked-status">
+                    <span class="status-badge">✓ Already Tracked</span>
+                    <p class="status-detail">Status: <span id="applicationStatus">Saved</span></p>
+                    <p class="status-detail">Tracked: <span id="trackedDate">Today</span></p>
+                </div>
+
+                <button id="trackBtn" class="track-btn">📌 Track Job</button>
+
+                <div id="errorMessage" class="error-message" style="display: none;"></div>
+            </div>
+
+            <!-- Not Authenticated State -->
+            <div id="loginState" class="state-container" style="display: none;">
+                <div class="icon-large">🔐</div>
+                <h3>Sign in to track jobs</h3>
+                <form id="loginForm" class="login-form">
+                    <input type="email" id="emailInput" placeholder="Email" required>
+                    <input type="password" id="passwordInput" placeholder="Password" required>
+                    <button type="submit" class="login-btn">Sign In</button>
+                    <div id="loginError" class="error-message" style="display: none;"></div>
+                </form>
+                <p class="signup-link">Don't have an account? <a href="#" id="signupLink">Sign up</a></p>
+            </div>
+        </main>
+
+        <footer>
+            <a href="#" id="dashboardLink">📊 Dashboard</a>
+            <span class="version">v0.1.0</span>
+        </footer>
+    </div>
+
+    <script src="popup.js" type="module"></script>
+</body>
+</html>

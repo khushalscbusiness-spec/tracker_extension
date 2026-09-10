@@ -1,0 +1,9 @@
+
+.aider*
+.env
+combined_code.txt
+combined_code.txt
+structure.txt
+dist/
+node_modules/
+*.zip
