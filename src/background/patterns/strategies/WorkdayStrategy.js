@@ -128,6 +128,7 @@ export class WorkdayStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a Workday URL
    */
   canHandle(url) {
+    if (!url) return false;
     const patterns = [
       /myworkdayjobs\.com/,
       /workday\.com/,
@@ -163,6 +164,7 @@ export class WorkdayStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a success page
    */
   isSuccessPage(url) {
+    if (!url) return false;
     const urlLower = url.toLowerCase();
 
     // Check URL patterns
@@ -197,6 +199,14 @@ export class WorkdayStrategy extends SubmissionDetectionStrategy {
    * @returns {Object} { step: string, label: string, pattern: string, matchedPattern: string }
    */
   detectStep(url, pageTitle, pageContent) {
+    if (!url) {
+      return {  // ✅ ADD THIS BLOCK
+        step: 'unknown',
+        label: 'Unknown Step',
+        pattern: 'none',
+        matchedPattern: null
+      };
+    }
     const urlLower = url.toLowerCase();
     const titleLower = pageTitle ? pageTitle.toLowerCase() : '';
     const contentLower = pageContent ? pageContent.toLowerCase() : '';
@@ -518,6 +528,7 @@ export class WorkdayStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if success indicators are found
    */
   containsSuccessIndicators(pageContent, pageTitle) {
+    if (!pageContent && !pageTitle) return false;
     // Check title
     if (pageTitle) {
       for (const pattern of this.successPatterns.titlePatterns) {
@@ -552,6 +563,7 @@ export class WorkdayStrategy extends SubmissionDetectionStrategy {
    * @returns {string|null} Job ID or null
    */
   extractJobIdFromUrl(url) {
+    if (!url) return null;
     try {
       // Workday URL patterns
       const patterns = [

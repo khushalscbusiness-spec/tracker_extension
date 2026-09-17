@@ -4,6 +4,13 @@ import { GenericStrategy } from '../strategies/GenericStrategy.js';
 import { GreenhouseStrategy } from '../strategies/GreenhouseStrategy.js';
 import { LeverStrategy } from '../strategies/LeverStrategy.js';
 import { WorkdayStrategy } from '../strategies/WorkdayStrategy.js';
+import { AshbyStrategy } from '../strategies/AshbyStrategy.js';
+import { DeelStrategy } from '../strategies/DeelStrategy.js';
+import { SmartRecruitersStrategy } from '../strategies/SmartRecruitersStrategy.js';
+import { RippleHireStrategy } from '../strategies/RippleHireStrategy.js';
+import { iCIMSStrategy } from '../strategies/iCIMSStrategy.js';
+import { BambooHRStrategy } from '../strategies/BambooHRStrategy.js';
+import { TaleoStrategy } from '../strategies/TaleoStrategy.js';
 
 /**
  * Strategy Factory
@@ -20,6 +27,19 @@ import { WorkdayStrategy } from '../strategies/WorkdayStrategy.js';
  * - Higher priority strategies are checked first
  * - The first strategy that can handle the URL is selected
  * - GenericStrategy (priority 0) is the fallback
+ *
+ * Registered Strategies (by priority):
+ * - Greenhouse (10)
+ * - Lever (9)
+ * - Workday (8)
+ * - Ashby (7)
+ * - Deel (7)
+ * - SmartRecruiters (6)
+ * - RippleHire (6)
+ * - iCIMS (5)
+ * - BambooHR (4)
+ * - Taleo (3)
+ * - Generic (0) - fallback
  */
 export class StrategyFactory {
   constructor() {
@@ -46,6 +66,13 @@ export class StrategyFactory {
       { class: GreenhouseStrategy, priority: 10 },
       { class: LeverStrategy, priority: 9 },
       { class: WorkdayStrategy, priority: 8 },
+      { class: AshbyStrategy, priority: 7 },
+      { class: DeelStrategy, priority: 7 },
+      { class: SmartRecruitersStrategy, priority: 6 },
+      { class: RippleHireStrategy, priority: 6 },
+      { class: iCIMSStrategy, priority: 5 },
+      { class: BambooHRStrategy, priority: 4 },
+      { class: TaleoStrategy, priority: 3 },
       { class: GenericStrategy, priority: 0 }
     ];
 
@@ -88,6 +115,12 @@ export class StrategyFactory {
    * @returns {SubmissionDetectionStrategy} The appropriate strategy
    */
   getStrategy(url) {
+    // ✅ FIX: Handle null/undefined/empty URL
+    if (!url || typeof url !== 'string' || url.trim() === '') {
+      console.log('[StrategyFactory] ⚠️ Null/empty URL provided, using generic fallback');
+      return this.getStrategyByName('generic') || new GenericStrategy();
+    }
+
     console.log(`[StrategyFactory] Getting strategy for URL: ${url}`);
 
     // Try each strategy in priority order
@@ -125,6 +158,11 @@ export class StrategyFactory {
    * @returns {SubmissionDetectionStrategy|null} The strategy or null if not found
    */
   getStrategyByName(atsName) {
+    if (!atsName) {
+      console.warn('[StrategyFactory] getStrategyByName: null atsName');
+      return null;
+    }
+
     // Check cache first
     if (this.instanceCache.has(atsName)) {
       return this.instanceCache.get(atsName);
@@ -177,7 +215,7 @@ export class StrategyFactory {
    * @returns {string} The ATS name or 'unknown'
    */
   detectAtsFromUrl(url) {
-    // Get strategy for URL
+    if (!url) return 'unknown';
     const strategy = this.getStrategy(url);
     return strategy ? strategy.getAtsName() : 'unknown';
   }
@@ -188,6 +226,7 @@ export class StrategyFactory {
    * @returns {string} The display name
    */
   getAtsDisplayName(atsName) {
+    if (!atsName) return 'Unknown';
     const strategy = this.getStrategyByName(atsName);
     return strategy ? strategy.getDisplayName() : atsName;
   }
@@ -215,6 +254,7 @@ export class StrategyFactory {
    * @returns {boolean} True if from a known ATS
    */
   isKnownAts(url) {
+    if (!url) return false;
     const strategy = this.getStrategy(url);
     return strategy ? strategy.getAtsName() !== 'generic' : false;
   }
@@ -229,6 +269,21 @@ export class StrategyFactory {
       result[name] = instance;
     }
     return result;
+  }
+
+  /**
+   * Pre-load all strategies into cache
+   * Useful for warming up the factory
+   */
+  preloadAll() {
+    console.log('[StrategyFactory] Preloading all strategies...');
+    for (const config of this.strategies) {
+      if (!this.instanceCache.has(config.atsName)) {
+        const instance = new config.class();
+        this.instanceCache.set(config.atsName, instance);
+      }
+    }
+    console.log(`[StrategyFactory] Preloaded ${this.instanceCache.size} strategies`);
   }
 }
 

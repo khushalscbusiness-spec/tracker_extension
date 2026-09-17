@@ -11,6 +11,7 @@ import { SubmissionDetectionStrategy } from '../base/SubmissionDetectionStrategy
  * Greenhouse is one of the most popular ATS platforms used by companies
  * for job applications. They typically use:
  * - URL patterns: /apply/thank-you, /apply/success, /jobs/thank-you
+ * - Query params: gh_jid, gh_src (works on custom domains)
  * - Page titles: "Thank you for applying", "Application submitted"
  * - Page content: "We appreciate your interest", "Your application has been received"
  *
@@ -69,7 +70,8 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
         '/apply/',
         '/application/',
         'apply?',
-        'application?'
+        'application?',
+        'gh_jid='
       ],
       review: [
         '/review',
@@ -95,11 +97,20 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
 
   /**
    * Check if this strategy can handle the given URL
-   * Matches Greenhouse domains: greenhouse.io, grnh.se, boards.greenhouse.io, job-boards.greenhouse.io
+   *
+   * Detection methods (in order):
+   * 1. Domain match (greenhouse.io, grnh.se, boards.greenhouse.io, job-boards.greenhouse.io)
+   * 2. Query params (gh_jid=, gh_src=) — works on custom domains
+   * 3. Path match (greenhouse, grnh.se)
+   *
    * @param {string} url - The URL to check
    * @returns {boolean} True if it's a Greenhouse URL
    */
   canHandle(url) {
+    // ✅ NULL CHECK
+    if (!url) return false;
+
+    // ✅ 1. Domain match
     const patterns = [
       /greenhouse\.io/,
       /grnh\.se/,
@@ -109,13 +120,20 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
 
     for (const pattern of patterns) {
       if (this.matchesDomain(url, pattern)) {
-        console.log(`[GreenhouseStrategy] ✅ Can handle URL: ${url}`);
+        console.log(`[GreenhouseStrategy] ✅ Can handle URL (domain): ${url}`);
         return true;
       }
     }
 
-    // Also check if URL contains greenhouse-specific paths even if domain doesn't match
+    // ✅ 2. Query params — Greenhouse-specific identifiers on custom domains
+    // Example: https://keydatacyber.com/careers?gh_jid=4726983005&gh_src=...
     const urlLower = url.toLowerCase();
+    if (urlLower.includes('gh_jid=') || urlLower.includes('gh_src=')) {
+      console.log(`[GreenhouseStrategy] ✅ Can handle URL (query params): ${url}`);
+      return true;
+    }
+
+    // ✅ 3. Path match — fallback
     if (urlLower.includes('greenhouse') || urlLower.includes('grnh.se')) {
       console.log(`[GreenhouseStrategy] ✅ Can handle URL (path match): ${url}`);
       return true;
@@ -130,6 +148,9 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a success page
    */
   isSuccessPage(url) {
+    // ✅ NULL CHECK
+    if (!url) return false;
+
     const urlLower = url.toLowerCase();
 
     // First check for Greenhouse-specific success URL patterns
@@ -165,6 +186,16 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
    * @returns {Object} { step: string, label: string, pattern: string, matchedPattern: string }
    */
   detectStep(url, pageTitle) {
+    // ✅ NULL CHECK
+    if (!url) {
+      return {
+        step: 'unknown',
+        label: 'Unknown Step',
+        pattern: 'none',
+        matchedPattern: null
+      };
+    }
+
     const urlLower = url.toLowerCase();
     const titleLower = pageTitle ? pageTitle.toLowerCase() : '';
 
@@ -213,6 +244,21 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
         pattern: 'success_page',
         matchedPattern: 'success_page'
       };
+    }
+
+    // ✅ Check if it's a Greenhouse application page via query params
+    if (urlLower.includes('gh_jid=') || urlLower.includes('gh_src=')) {
+      // If it has gh_jid but no success path, it's a form
+      if (!urlLower.includes('/confirmation') &&
+          !urlLower.includes('/thank-you') &&
+          !urlLower.includes('/success')) {
+        return {
+          step: 'form',
+          label: 'Application Form',
+          pattern: 'query_param',
+          matchedPattern: 'gh_jid'
+        };
+      }
     }
 
     // Check if it's a Greenhouse application page (form detection)
@@ -345,6 +391,9 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if success indicators are found
    */
   containsSuccessIndicators(pageContent, pageTitle) {
+    // ✅ NULL CHECK
+    if (!pageContent && !pageTitle) return false;
+
     // Check title
     if (pageTitle) {
       for (const pattern of this.successPatterns.titlePatterns) {
@@ -372,6 +421,9 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
    * @returns {string|null} Job ID or null
    */
   extractJobIdFromUrl(url) {
+    // ✅ NULL CHECK
+    if (!url) return null;
+
     try {
       // Greenhouse URL patterns: /jobs/1234567890
       const patterns = [

@@ -153,7 +153,7 @@ export class SubmittedState extends SessionState {
 
     // Build the payload
     const payload = this.buildPayload();
-    console.log(`[SubmittedState] Payload:`, payload);
+    console.log(`[SubmittedState] Payload:`, JSON.stringify(payload, null, 2));
 
     // Send to backend
     try {
@@ -174,9 +174,6 @@ export class SubmittedState extends SessionState {
   buildPayload() {
     // Build URL chain with full details including job IDs
     const urlChain = this.buildUrlChain();
-    const urlChainFormatted = this.getUrlChainFormatted();
-    const simplifiedUrlChain = this.getSimplifiedUrlChain();
-    const urlChainWithJobIds = this.getUrlChainWithJobIds();
 
     // ✅ Get all job IDs
     const jobIds = this.session.jobIds || {};
@@ -191,12 +188,12 @@ export class SubmittedState extends SessionState {
       location: this.session.location || null,
       jobUrl: this.session.jobUrl,
 
-      // ✅ Job ID Tracking - NEW
-      linkedInJobId: this.session.jobId, // Original LinkedIn job ID
-      externalJobId: externalJobId, // Job ID from external URLs
-      jobIds: jobIds, // Map of all job IDs by source
-      applicationReference: applicationReference, // Application reference/confirmation number
-      confirmationNumber: applicationReference, // Alias for application reference
+      // ✅ Job ID Tracking
+      linkedInJobId: this.session.jobId,
+      externalJobId: externalJobId,
+      jobIds: jobIds,
+      applicationReference: applicationReference,
+      confirmationNumber: applicationReference,
 
       // Application Information
       status: 'applied',
@@ -207,29 +204,8 @@ export class SubmittedState extends SessionState {
       thankYouPhrase: this.session.thankYouPhrase || null,
       confirmationMessage: this.session.confirmationMessage || null,
 
-      // URL Information (Original fields)
-      linkedInUrl: this.session.jobUrl,
-      applyUrl: this.session.applyUrl,
-      redirectUrl: this.session.redirectUrl,
-      successUrl: this.session.successUrl || null,
-
-      // ✅ Complete URL Chain
+      // ✅ Complete URL Chain (includes order, label, jobId, timestamp, tabId, title)
       urlChain: urlChain,
-      urlChainFormatted: urlChainFormatted,
-      simplifiedUrlChain: simplifiedUrlChain,
-      urlChainWithJobIds: urlChainWithJobIds, // ✅ NEW - URL chain with job IDs
-
-      // ✅ All visited URLs
-      visitedUrls: this.session.visitedUrls || [],
-
-      // ✅ Quick access fields
-      firstUrl: this.session.visitedUrls && this.session.visitedUrls.length > 0
-        ? this.session.visitedUrls[0].url
-        : null,
-      lastUrl: this.session.visitedUrls && this.session.visitedUrls.length > 0
-        ? this.session.visitedUrls[this.session.visitedUrls.length - 1].url
-        : null,
-      urlCount: this.session.visitedUrls ? this.session.visitedUrls.length : 0,
 
       // Timing Information
       startedAt: this.session.startedAt,
@@ -277,7 +253,7 @@ export class SubmittedState extends SessionState {
       timestamp: entry.timestamp,
       tabId: entry.tabId || null,
       title: entry.title || null,
-      jobId: entry.jobId || null // ✅ Include job ID for each URL
+      jobId: entry.jobId || null
     }));
   }
 

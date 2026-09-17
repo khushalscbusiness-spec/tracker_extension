@@ -8,6 +8,8 @@ import tabRemovedObserver from '../patterns/observers/TabRemovedObserver.js';
 import { InProgressState } from '../patterns/states/InProgressState.js';
 import { SubmittedState } from '../patterns/states/SubmittedState.js';
 import { AbandonedState } from '../patterns/states/AbandonedState.js';
+import { STATES } from '../patterns/states/state-registry.js';
+
 
 /**
  * Application Tracker
@@ -235,8 +237,7 @@ export class ApplicationTracker {
           redirectedAt: Date.now()
         });
 
-        const { RedirectingState } = await import('../patterns/states/RedirectingState.js');
-        const redirectingState = new RedirectingState(updated);
+        const redirectingState = new STATES.redirecting(updated);
         updated.currentState.transitionTo(redirectingState);
 
         console.log(`[ApplicationTracker] ✅ Session transitioned to RedirectingState`);
@@ -374,6 +375,19 @@ export class ApplicationTracker {
           return;
         }
       }
+
+      // ✅ NEW: Auto-create session if URL is a job page
+      if (this.isJobPageFromUrl(event.url)) {
+        console.log(`[ApplicationTracker] 🆕 Auto-creating session for job page: ${event.url}`);
+        const newSession = this.createSessionFromUrl(event.url, event.tab);
+
+        if (newSession) {
+          console.log(`[ApplicationTracker] ✅ Auto-created session: ${newSession.sessionId}`);
+          await this.processSessionUpdate(newSession, event);
+          return;
+        }
+      }
+
       return;
     }
 
@@ -507,8 +521,7 @@ export class ApplicationTracker {
       });
 
       // Transition to SubmittedState
-      const { SubmittedState } = await import('../patterns/states/SubmittedState.js');
-      const submittedState = new SubmittedState(session);
+      const submittedState = new STATES.submitted(session);
       if (session.currentState) {
         session.currentState.transitionTo(submittedState);
       } else {
@@ -567,11 +580,10 @@ export class ApplicationTracker {
           // If it's the redirect tab, transition to abandoned
           if (s.redirectTabId === event.tabId && s.status !== 'submitted') {
             console.log(`[ApplicationTracker] ❌ Redirect tab closed: ${event.tabId}`);
-            const { AbandonedState } = await import('../patterns/states/AbandonedState.js');
             const abandonReason = s.status === 'in_progress'
               ? 'tab_closed_during_application'
               : 'tab_closed_before_load';
-            const abandonedState = new AbandonedState(s, abandonReason);
+            const abandonedState = new STATES.abandoned(s, abandonReason);
             if (s.currentState) {
               s.currentState.transitionTo(abandonedState);
             } else {
@@ -612,12 +624,11 @@ export class ApplicationTracker {
     if (isRedirectTab) {
       console.log('[ApplicationTracker] Redirect tab closed during application');
 
-      const { AbandonedState } = await import('../patterns/states/AbandonedState.js');
       const abandonReason = session.status === 'in_progress'
         ? 'tab_closed_during_application'
         : 'tab_closed_before_load';
 
-      const abandonedState = new AbandonedState(session, abandonReason);
+      const abandonedState = new STATES.abandoned(session, abandonReason);
       if (session.currentState) {
         session.currentState.transitionTo(abandonedState);
       } else {
@@ -670,8 +681,7 @@ export class ApplicationTracker {
       // If step is 'success', immediately transition to SubmittedState
       if (stepResult.step === 'success') {
         console.log(`[ApplicationTracker] 🎉 Success step detected, transitioning to SubmittedState`);
-        const { SubmittedState } = await import('../patterns/states/SubmittedState.js');
-        const submittedState = new SubmittedState(session);
+        const submittedState = new STATES.submitted(session);
         inProgressState.transitionTo(submittedState);
         return true;
       }
@@ -818,6 +828,166 @@ export class ApplicationTracker {
     this.notifyCallbacks('session_updated', session);
   }
 
+  /**
+   * ✅ Handle content-based success detection (from iframe/modal)
+   * @param {Object} session - The session
+   * @param {Object} payload - Success payload
+   */
+  handleSuccessDetected(session, payload) {
+    console.log('[ApplicationTracker] 🎉 Content-based success for:', session.sessionId);
+    console.log('[ApplicationTracker]   Phrase:', payload.phrase);
+    console.log('[ApplicationTracker]   URL:', payload.url);
+    console.log('[ApplicationTracker]   Method:', payload.detectionMethod || 'content');
+    console.log('[ApplicationTracker]   From iframe:', payload.isIframe ? 'yes' : 'no');
+
+    // Skip if already submitted
+    if (session.status === 'submitted') {
+      console.log('[ApplicationTracker] Session already submitted, skipping');
+      return;
+    }
+
+    // Update session to submitted
+    sessionManager.updateSession(session.sessionId, {
+      status: 'submitted',
+      submittedAt: Date.now(),
+      successUrl: payload.url,
+      thankYouPhrase: payload.phrase,
+      successDetectionMethod: payload.detectionMethod || 'content'
+    });
+
+    // Transition to SubmittedState
+    const submittedState = new STATES.submitted(session);
+    if (session.currentState) {
+      session.currentState.transitionTo(submittedState);
+    } else {
+      submittedState.onEnter();
+      session.currentState = submittedState;
+    }
+
+    console.log(`[ApplicationTracker] ✅ Session ${session.sessionId} marked as SUBMITTED (content-based)!`);
+
+    // Dispatch submission event
+    this.dispatchSubmissionEvent(session);
+  }
+
+  // ============================================
+  // ✅ AUTO-SESSION CREATION (NEW)
+  // ============================================
+
+  /**
+   * Check if URL is a job page (works without content script)
+   * @param {string} url - The URL to check
+   * @returns {boolean} True if it's a job page
+   */
+  isJobPageFromUrl(url) {
+    if (!url) return false;
+
+    const urlLower = url.toLowerCase();
+
+    // ✅ Check for ATS query params (works on any domain)
+    if (urlLower.includes('gh_jid=') || urlLower.includes('gh_src=')) {
+      return true;  // Greenhouse job on custom domain
+    }
+
+    // ✅ Check for common ATS domains
+    const patterns = [
+      /greenhouse\.io/,
+      /grnh\.se/,
+      /lever\.co/,
+      /myworkdayjobs\.com/,
+      /workday\.com/,
+      /ashbyhq\.com/,
+      /ashby\.com/,
+      /smartrecruiters\.com/,
+      /icims\.com/,
+      /bamboohr\.com/,
+      /taleo\.net/,
+      /deel\.com/,
+      /jobs\.deel/
+    ];
+
+    return patterns.some(p => p.test(urlLower));
+  }
+
+  /**
+   * Create a session from a URL (for direct navigation)
+   * @param {string} url - The job page URL
+   * @param {Object} tab - The Chrome tab object
+   * @returns {Object|null} Created session or null
+   */
+  createSessionFromUrl(url, tab) {
+    if (!url) return null;
+
+    try {
+      const urlObj = new URL(url);
+      const hostname = urlObj.hostname.replace('www.', '');
+      const company = hostname.split('.')[0];
+      const companyName = company.charAt(0).toUpperCase() + company.slice(1);
+
+      // Detect ATS
+      const strategy = strategyFactory.getStrategy(url);
+      const atsName = strategy.getAtsName();
+      const jobId = this.extractJobIdFromUrl(url);
+
+      // Create session
+      const session = sessionManager.createSession(
+        {
+          externalJobId: jobId,
+          title: tab?.title || 'Unknown Job',
+          company: companyName,
+          url: url
+        },
+        {
+          redirectUrl: url,
+          sourceTabId: tab?.id,
+          applyType: 'direct',
+          applyMethod: 'direct_navigation'
+        }
+      );
+
+      // Set ATS
+      session.ats = atsName;
+      session.atsName = strategy.getDisplayName();
+      session.atsStrategy = strategy;
+
+      // Job IDs
+      if (!session.jobIds) session.jobIds = {};
+      if (jobId) {
+        const source = this.detectJobIdSource(url);
+        session.jobIds[source] = jobId;
+        session.externalJobId = jobId;
+      }
+
+      // URL chain
+      if (!session.visitedUrls) session.visitedUrls = [];
+      session.visitedUrls.push({
+        url: url,
+        timestamp: Date.now(),
+        tabId: tab?.id,
+        title: tab?.title,
+        order: 1,
+        label: this.getUrlLabel(url),
+        jobId: jobId
+      });
+
+      // Map tab to session
+      if (tab?.id) {
+        sessionManager.mapTabToSession(tab.id, session.sessionId);
+      }
+
+      console.log('[ApplicationTracker] ✅ Auto-created session from URL');
+      console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
+      console.log(`[ApplicationTracker]   Company: ${session.company}`);
+      console.log(`[ApplicationTracker]   ATS: ${session.atsName}`);
+      console.log(`[ApplicationTracker]   Job ID: ${jobId}`);
+
+      return session;
+    } catch (error) {
+      console.error('[ApplicationTracker] Failed to create session from URL:', error);
+      return null;
+    }
+  }
+
   // ============================================
   // EVENT DISPATCH
   // ============================================
@@ -960,6 +1130,7 @@ export class ApplicationTracker {
       const urlObj = new URL(url);
       const pathname = urlObj.pathname;
       const search = urlObj.search;
+      const hash = urlObj.hash;  // ✅ NEW — for RippleHire & hash-based URLs
 
       // ============================================
       // 1. LinkedIn
@@ -1010,24 +1181,40 @@ export class ApplicationTracker {
       if (leverQueryMatch) return leverQueryMatch[1];
 
       // ============================================
-      // 5. Workday
+      // 5. RippleHire (hash-based) ✅ NEW
       // ============================================
-      // /job-12345
-      const workdayMatch = pathname.match(/\/job-(\d+)/);
+      // #apply/job/844714 or #detail/job/844714
+      const ripplehireMatch = hash.match(/\/(?:apply|detail)\/job\/(\d+)/);
+      if (ripplehireMatch) return ripplehireMatch[1];
+
+      // ============================================
+      // 6. Workday
+      // ============================================
+      // Nike URL: /job/Karnataka-India/Senior-Software-Engineer--ITC_R-86725/apply
+      // Pattern: _R-12345 or _JR-12345
+      const workdayMatch = pathname.match(/_([A-Z]+-?\d+)/);
       if (workdayMatch) return workdayMatch[1];
+
+      // Fallback: /job/12345
+      const workdayJobMatch = pathname.match(/\/job\/(\d+)/);
+      if (workdayJobMatch) return workdayJobMatch[1];
+
+      // Fallback: /job-12345
+      const workdayDashMatch = pathname.match(/\/job-(\d+)/);
+      if (workdayDashMatch) return workdayDashMatch[1];
 
       // requisition=12345
       const workdayRequisitionMatch = search.match(/[?&]requisition=(\d+)/);
       if (workdayRequisitionMatch) return workdayRequisitionMatch[1];
 
-      // /job/12345
-      const workdayJobMatch = pathname.match(/\/job\/(\d+)/);
-      if (workdayJobMatch) return workdayJobMatch[1];
+      // ============================================
+      // 7. Ashby
+      // ============================================
+      // UUID in path: jobs.ashbyhq.com/company/736024c0-15b1-4c75-82fd-7e1798f6ab79
+      const ashbyUuidMatch = pathname.match(/\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+      if (ashbyUuidMatch) return ashbyUuidMatch[1];
 
-      // ============================================
-      // 6. Ashby
-      // ============================================
-      // /jobs/12345
+      // Fallback: /jobs/12345
       const ashbyMatch = pathname.match(/\/jobs\/([^\/?]+)/);
       if (ashbyMatch && !ashbyMatch[1].includes('.')) return ashbyMatch[1];
 
@@ -1036,7 +1223,7 @@ export class ApplicationTracker {
       if (ashbyQueryMatch) return ashbyQueryMatch[1];
 
       // ============================================
-      // 7. Generic
+      // 8. Generic
       // ============================================
       // job_id=12345, jobId=12345, id=12345
       const genericJobIdMatch = search.match(/[?&](?:job_?id|jobId|jobid|id)=([^&]+)/i);
@@ -1045,6 +1232,10 @@ export class ApplicationTracker {
       // /job/12345, /jobs/12345
       const genericPathMatch = pathname.match(/\/jobs?\/(\d+)/);
       if (genericPathMatch) return genericPathMatch[1];
+
+      // Hash fallback: #/job/12345, #/jobs/12345
+      const genericHashMatch = hash.match(/\/(?:job|jobs|position)\/([^\/?]+)/i);
+      if (genericHashMatch) return genericHashMatch[1];
 
       return null;
 
@@ -1072,7 +1263,13 @@ export class ApplicationTracker {
     }
     if (urlLower.includes('lever.co') || urlLower.includes('jobs.lever.co')) return 'lever';
     if (urlLower.includes('workday.com') || urlLower.includes('myworkdayjobs.com')) return 'workday';
-    if (urlLower.includes('ashby.com')) return 'ashby';
+    if (urlLower.includes('ashbyhq.com') || urlLower.includes('ashby.com')) return 'ashby';
+    if (urlLower.includes('ripplehire.com')) return 'ripplehire';
+    if (urlLower.includes('smartrecruiters.com')) return 'smartrecruiters';
+    if (urlLower.includes('icims.com')) return 'icims';
+    if (urlLower.includes('bamboohr.com')) return 'bamboohr';
+    if (urlLower.includes('taleo.net')) return 'taleo';
+    if (urlLower.includes('deel.com') || urlLower.includes('jobs.deel')) return 'deel';
 
     return 'external';
   }
@@ -1089,18 +1286,38 @@ export class ApplicationTracker {
       const urlObj = new URL(url);
       const search = urlObj.search;
       const pathname = urlObj.pathname;
+      const hash = urlObj.hash;
 
-      // Greenhouse: token=12345
+      // ============================================
+      // 1. Greenhouse: token=12345
+      // ============================================
       const tokenMatch = search.match(/[?&]token=(\d+)/);
       if (tokenMatch) return tokenMatch[1];
 
-      // Generic: applicationId=xxx, confirmation=xxx, reference=xxx
+      // ============================================
+      // 2. RippleHire (hash-based) ✅ NEW
+      // ============================================
+      // #apply/job/844714 or #detail/job/844714
+      const ripplehireMatch = hash.match(/\/(?:apply|detail)\/job\/(\d+)/);
+      if (ripplehireMatch) return ripplehireMatch[1];
+
+      // ============================================
+      // 3. Generic: applicationId=xxx, confirmation=xxx, reference=xxx
+      // ============================================
       const appIdMatch = search.match(/[?&](?:applicationId|confirmation|reference|application_id)=([^&]+)/i);
       if (appIdMatch) return appIdMatch[1];
 
-      // Try to extract from path: /confirmation/12345
+      // ============================================
+      // 4. Path-based: /confirmation/12345
+      // ============================================
       const pathMatch = pathname.match(/\/confirmation\/([^\/?]+)/);
       if (pathMatch) return pathMatch[1];
+
+      // ============================================
+      // 5. Hash-based generic: #confirmation/12345
+      // ============================================
+      const hashConfirmMatch = hash.match(/\/(?:confirmation|success|thank-you)\/([^\/?]+)/i);
+      if (hashConfirmMatch) return hashConfirmMatch[1];
 
       return null;
 

@@ -81,10 +81,16 @@ export class GenericStrategy extends SubmissionDetectionStrategy {
   }
 
   canHandle(url) {
+    // ✅ NULL CHECK
+    if (!url) return true;
+
     return true;
   }
 
   isSuccessPage(url) {
+    // ✅ NULL CHECK
+    if (!url) return false;
+
     const urlLower = url.toLowerCase();
     for (const pattern of this.successPatterns.urlPatterns) {
       if (urlLower.includes(pattern.toLowerCase())) {
@@ -96,6 +102,16 @@ export class GenericStrategy extends SubmissionDetectionStrategy {
   }
 
   detectStep(url, pageTitle) {
+    // ✅ NULL CHECK
+    if (!url) {
+      return {
+        step: 'unknown',
+        label: 'Unknown Step',
+        pattern: 'none',
+        matchedPattern: null
+      };
+    }
+
     const urlLower = url.toLowerCase();
     const titleLower = pageTitle ? pageTitle.toLowerCase() : '';
 
@@ -181,6 +197,9 @@ export class GenericStrategy extends SubmissionDetectionStrategy {
   }
 
   extractAtsFromUrl(url) {
+    // ✅ NULL CHECK
+    if (!url) return 'external';
+
     try {
       const urlObj = new URL(url);
       const hostname = urlObj.hostname.replace('www.', '');
@@ -191,7 +210,9 @@ export class GenericStrategy extends SubmissionDetectionStrategy {
   }
 
   containsSuccessIndicators(pageContent) {
+    // ✅ NULL CHECK (already existed, kept as-is)
     if (!pageContent) return false;
+
     const contentLower = pageContent.toLowerCase();
     for (const pattern of this.successPatterns.textPatterns) {
       if (contentLower.includes(pattern.toLowerCase())) {

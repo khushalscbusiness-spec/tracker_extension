@@ -5,7 +5,7 @@ import { STATE_MANAGER } from '../state/state-manager.js';
 import { STORAGE } from '../utils/storage.js';
 import { loadConfig, getConfig } from '../config/config.js';
 
-// Import the new Application Tracker
+// Import the Application Tracker
 import applicationTracker from './managers/ApplicationTracker.js';
 import sessionManager from './managers/SessionManager.js';
 
@@ -17,6 +17,14 @@ class ServiceWorker {
     this.stateManager = STATE_MANAGER;
     this.apiClient = API_CLIENT;
     this.isInitialized = false;
+
+    // ✅ FIX: Track processed apply clicks to avoid duplicates
+    this.processedApplyClicks = new Set();
+
+    // ✅ FIX: Cleanup interval for processed clicks
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupProcessedClicks();
+    }, 30000); // Clean every 30 seconds
 
     this.setupListeners();
     this.initialize();
@@ -63,6 +71,55 @@ class ServiceWorker {
       console.log('[JobPulse] ✅ Service worker fully initialized');
     } catch (error) {
       console.error('[JobPulse] Initialization error:', error);
+    }
+  }
+
+  // ============================================
+  // DEDUPLICATION HELPERS
+  // ============================================
+
+  /**
+   * Generate a dedup key for apply clicks
+   * @param {Object} payload - Apply click payload
+   * @param {Object} sender - Message sender
+   * @returns {string} Dedup key
+   */
+  getApplyClickDedupKey(payload, sender) {
+    const jobId = payload.jobId || payload.job?.externalJobId || 'unknown';
+    const tabId = sender.tab?.id || 'unknown';
+    return `${jobId}_${tabId}`;
+  }
+
+  /**
+   * Check if apply click is duplicate
+   * @param {string} dedupKey - Dedup key
+   * @returns {boolean} True if duplicate
+   */
+  isDuplicateApplyClick(dedupKey) {
+    return this.processedApplyClicks.has(dedupKey);
+  }
+
+  /**
+   * Mark apply click as processed
+   * @param {string} dedupKey - Dedup key
+   */
+  markApplyClickProcessed(dedupKey) {
+    this.processedApplyClicks.add(dedupKey);
+  }
+
+  /**
+   * Clean up old processed clicks
+   * Removes entries older than 60 seconds
+   */
+  cleanupProcessedClicks() {
+    const now = Date.now();
+    const maxAge = 60000; // 60 seconds
+
+    // Since we only store keys (not timestamps), we'll clear all periodically
+    // A more sophisticated approach would store timestamps
+    if (this.processedApplyClicks.size > 100) {
+      console.log(`[JobPulse] Cleaning up ${this.processedApplyClicks.size} processed clicks`);
+      this.processedApplyClicks.clear();
     }
   }
 
@@ -124,6 +181,12 @@ class ServiceWorker {
           console.log(`[JobPulse]   Job: ${data.jobTitle}`);
           console.log(`[JobPulse]   Company: ${data.company}`);
           console.log(`[JobPulse]   ATS: ${data.atsName}`);
+          if (data.jobIds) {
+            console.log(`[JobPulse]   Job IDs:`, data.jobIds);
+          }
+          if (data.applicationReference) {
+            console.log(`[JobPulse]   Reference: ${data.applicationReference}`);
+          }
 
           // Update state
           this.stateManager.setJobStatus({
@@ -184,13 +247,25 @@ class ServiceWorker {
   }
 
   isJobPage(url) {
+    if (!url) return false;
+
     const jobPatterns = [
       /linkedin\.com\/jobs\/view/,
       /linkedin\.com\/jobs\/search-results/,
       /naukri\.com\/job-listings/,
       /myworkdayjobs\.com/,
       /boards\.greenhouse\.io/,
-      /lever\.co/
+      /job-boards\.greenhouse\.io/,
+      /lever\.co/,
+      /jobs\.lever\.co/,
+      /ashbyhq\.com/,
+      /jobs\.ashbyhq\.com/,
+      /smartrecruiters\.com/,
+      /icims\.com/,
+      /bamboohr\.com/,
+      /taleo\.net/,
+      /jobs\.deel\.com/,
+      /deel\.com/
     ];
     return jobPatterns.some(pattern => pattern.test(url));
   }
@@ -254,6 +329,15 @@ class ServiceWorker {
         break;
 
       // ============================================
+      // ✅ SUCCESS DETECTION (Content + Iframe)
+      // ============================================
+
+      case 'SUCCESS_DETECTED':
+        await this.handleSuccessDetected(message.payload, sender);
+        sendResponse({ success: true });
+        break;
+
+      // ============================================
       // JOB TRACKING
       // ============================================
 
@@ -287,10 +371,22 @@ class ServiceWorker {
 
   /**
    * Handle apply click from content script
-   * This delegates to the ApplicationTracker
+   * ✅ FIX: Added deduplication to prevent duplicate sessions
    */
   async handleApplyClick(payload, sender) {
     console.log('[JobPulse] Apply click received:', payload);
+
+    // ✅ DEDUPLICATION: Check if this click was already processed
+    const dedupKey = this.getApplyClickDedupKey(payload, sender);
+
+    if (this.isDuplicateApplyClick(dedupKey)) {
+      console.log(`[JobPulse] ⚠️ Duplicate apply click detected, skipping: ${dedupKey}`);
+      return;
+    }
+
+    // Mark as processed
+    this.markApplyClickProcessed(dedupKey);
+    console.log(`[JobPulse] ✅ Marked apply click as processed: ${dedupKey}`);
 
     try {
       // Get current job from state
@@ -304,12 +400,28 @@ class ServiceWorker {
 
       // Extract redirect URL from LinkedIn's safety redirect
       let redirectUrl = payload.redirectUrl || payload.applyUrl;
+
+      // ✅ FIX: Handle null/empty redirectUrl
       if (payload.applyUrl && payload.applyUrl.includes('safety/go?url=')) {
-        const urlParams = new URLSearchParams(payload.applyUrl.split('?')[1]);
-        const encodedUrl = urlParams.get('url');
-        if (encodedUrl) {
-          redirectUrl = decodeURIComponent(encodedUrl);
+        try {
+          const urlParams = new URLSearchParams(payload.applyUrl.split('?')[1]);
+          const encodedUrl = urlParams.get('url');
+          if (encodedUrl) {
+            redirectUrl = decodeURIComponent(encodedUrl);
+          }
+        } catch (e) {
+          console.warn('[JobPulse] Could not parse redirect URL:', e);
         }
+      }
+
+      // ✅ FIX: If redirectUrl is still null, try to use applyUrl
+      if (!redirectUrl && payload.applyUrl) {
+        redirectUrl = payload.applyUrl;
+      }
+
+      // ✅ FIX: If still null, log warning but continue
+      if (!redirectUrl) {
+        console.warn('[JobPulse] No redirect URL found in apply click');
       }
 
       // Prepare apply data
@@ -376,6 +488,88 @@ class ServiceWorker {
       success: true,
       sessionId: result?.sessionId
     };
+  }
+
+  // ============================================
+  // ✅ SUCCESS DETECTION HANDLER
+  // ============================================
+
+  /**
+   * Handle success detected from content script (main frame or iframe)
+   * @param {Object} payload - Success payload
+   * @param {Object} sender - Message sender
+   */
+  async handleSuccessDetected(payload, sender) {
+    console.log('[JobPulse] 🎉 Success detected from content:', payload.phrase);
+    console.log('[JobPulse]   URL:', payload.url);
+    console.log('[JobPulse]   From iframe:', payload.isIframe ? 'yes' : 'no');
+    console.log('[JobPulse]   Method:', payload.detectionMethod || 'content');
+
+    // Get tab ID (for iframe, sender.tab.id is the parent tab)
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      console.warn('[JobPulse] No tab ID in success message');
+      return;
+    }
+
+    console.log('[JobPulse] Looking for session for tab:', tabId);
+
+    // Find session for this tab
+    let session = sessionManager.getSessionByTabId(tabId);
+
+    if (!session) {
+      // Fallback: search all active sessions for this tab
+      const allSessions = sessionManager.getActiveSessions();
+      session = allSessions.find(s =>
+        s.trackedTabs && s.trackedTabs.includes(tabId)
+      );
+    }
+
+    if (!session) {
+      console.log('[JobPulse] ⚠️ No session found for tab', tabId);
+      return;
+    }
+
+    // Skip if already submitted
+    if (session.status === 'submitted') {
+      console.log('[JobPulse] Session already submitted, skipping');
+      return;
+    }
+
+    console.log('[JobPulse] ✅ Notifying ApplicationTracker:', session.sessionId);
+
+    // ✅ Notify ApplicationTracker
+    // ApplicationTracker.handleSuccessDetected() will:
+    // 1. Update session to submitted
+    // 2. Transition to SubmittedState
+    // 3. Trigger SubmittedState.onEnter()
+    // 4. Build and send payload
+    if (applicationTracker && typeof applicationTracker.handleSuccessDetected === 'function') {
+      applicationTracker.handleSuccessDetected(session, payload);
+    } else {
+      // Fallback: if ApplicationTracker not available, update session directly
+      console.warn('[JobPulse] ApplicationTracker not available, updating session directly');
+
+      await sessionManager.updateSession(session.sessionId, {
+        status: 'submitted',
+        submittedAt: Date.now(),
+        successUrl: payload.url,
+        thankYouPhrase: payload.phrase,
+        successDetectionMethod: payload.detectionMethod || 'content'
+      });
+
+      // Notify popup
+      chrome.runtime.sendMessage({
+        type: 'APPLICATION_SUBMITTED',
+        payload: {
+          sessionId: session.sessionId,
+          jobTitle: session.jobTitle,
+          company: session.company,
+          successUrl: payload.url,
+          thankYouPhrase: payload.phrase
+        }
+      }).catch(() => {});
+    }
   }
 
   // ============================================

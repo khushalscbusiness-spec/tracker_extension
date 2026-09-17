@@ -1,6 +1,8 @@
 // src/background/patterns/states/InProgressState.js
 
 import { SessionState } from '../base/SessionState.js';
+import { SubmittedState } from './SubmittedState.js';
+import { AbandonedState } from './AbandonedState.js';
 
 /**
  * In Progress State
@@ -31,7 +33,7 @@ export class InProgressState extends SessionState {
     this.lastStepDetected = null;
     this.stepDetectionCount = 0;
     this.inactivityCount = 0;
-    this.maxInactivityCount = 60; // 60 seconds of no activity
+    this.maxInactivityCount = 600; // 10 minutes of no activity (600 seconds)
   }
 
   /**
@@ -115,7 +117,6 @@ export class InProgressState extends SessionState {
         // Check if it's a success step
         if (stepResult.step === 'success') {
           // Transition to SubmittedState
-          const { SubmittedState } = await import('./SubmittedState.js');
           const submittedState = new SubmittedState(this.session);
           this.transitionTo(submittedState);
           return true;
@@ -127,7 +128,6 @@ export class InProgressState extends SessionState {
 
       // Check if it's a success page
       if (strategy.isSuccessPage(event.url)) {
-        const { SubmittedState } = await import('./SubmittedState.js');
         const submittedState = new SubmittedState(this.session);
         this.transitionTo(submittedState);
         return true;
@@ -154,7 +154,6 @@ export class InProgressState extends SessionState {
 
       if (stepResult.step !== 'unknown') {
         if (stepResult.step === 'success') {
-          const { SubmittedState } = await import('./SubmittedState.js');
           const submittedState = new SubmittedState(this.session);
           this.transitionTo(submittedState);
           return true;
@@ -175,7 +174,6 @@ export class InProgressState extends SessionState {
     console.log(`[InProgressState]   Job: ${this.session.jobTitle}`);
 
     // Transition to AbandonedState
-    const { AbandonedState } = await import('./AbandonedState.js');
     const abandonedState = new AbandonedState(this.session, 'tab_closed_during_application');
     this.transitionTo(abandonedState);
     return true;
@@ -195,8 +193,6 @@ export class InProgressState extends SessionState {
    */
   async handleSubmissionDetected(event) {
     console.log(`[InProgressState] 🎉 Submission detected for: ${this.session.jobTitle}`);
-
-    const { SubmittedState } = await import('./SubmittedState.js');
     const submittedState = new SubmittedState(this.session);
     this.transitionTo(submittedState);
     return true;
@@ -220,11 +216,13 @@ export class InProgressState extends SessionState {
     console.log(`[InProgressState] ⚠️ Inactivity count: ${this.inactivityCount}/${this.maxInactivityCount}`);
 
     if (this.inactivityCount >= this.maxInactivityCount) {
-      console.log(`[InProgressState] ⏰ User inactive for ${this.maxInactivityCount} seconds`);
+      console.log(`[InProgressState] ⏰ User inactive for ${this.maxInactivityCount / 60} minutes`);
       console.log(`[InProgressState]   Job: ${this.session.jobTitle}`);
 
-      // Check if session should be abandoned due to inactivity
-      const { AbandonedState } = await import('./AbandonedState.js');
+      // ✅ Stop the timer FIRST to prevent looping
+      this.clearInactivityTimer();
+
+      // ✅ Use direct import instead of registry
       const abandonedState = new AbandonedState(this.session, 'inactivity');
       this.transitionTo(abandonedState);
       return true;

@@ -1,6 +1,9 @@
 // src/background/patterns/states/RedirectingState.js
 
 import { SessionState } from '../base/SessionState.js';
+import { InProgressState } from './InProgressState.js';
+import { SubmittedState } from './SubmittedState.js';
+import { AbandonedState } from './AbandonedState.js';
 
 /**
  * Redirecting State
@@ -93,12 +96,10 @@ export class RedirectingState extends SessionState {
       // ✅ Check if it's a success page directly
       if (strategy.isSuccessPage(event.url)) {
         console.log('[RedirectingState] 🎉 Success page detected on load!');
-        const { InProgressState } = await import('./InProgressState.js');
         const inProgressState = new InProgressState(this.session);
         this.transitionTo(inProgressState);
 
         // Immediately transition to SubmittedState
-        const { SubmittedState } = await import('./SubmittedState.js');
         const submittedState = new SubmittedState(this.session);
         inProgressState.transitionTo(submittedState);
         return true;
@@ -107,13 +108,11 @@ export class RedirectingState extends SessionState {
       const step = strategy.detectStep(event.url, event.tab?.title || '');
       if (step.step !== 'unknown') {
         console.log(`[RedirectingState] Step detected on load: ${step.step}`);
-        const { InProgressState } = await import('./InProgressState.js');
         const inProgressState = new InProgressState(this.session);
         this.transitionTo(inProgressState);
 
         // If it's already a success step, transition to SubmittedState
         if (step.step === 'success') {
-          const { SubmittedState } = await import('./SubmittedState.js');
           const submittedState = new SubmittedState(this.session);
           inProgressState.transitionTo(submittedState);
           return true;
@@ -125,7 +124,6 @@ export class RedirectingState extends SessionState {
     // If we've loaded too many times without detecting a step
     if (this.loadAttempts >= this.maxLoadAttempts) {
       console.log('[RedirectingState] Max load attempts reached, transitioning to InProgress');
-      const { InProgressState } = await import('./InProgressState.js');
       const inProgressState = new InProgressState(this.session);
       this.transitionTo(inProgressState);
       return true;
@@ -146,11 +144,9 @@ export class RedirectingState extends SessionState {
       // ✅ Check if it's a success page directly
       if (strategy.isSuccessPage(event.url)) {
         console.log('[RedirectingState] 🎉 Success page detected during update!');
-        const { InProgressState } = await import('./InProgressState.js');
         const inProgressState = new InProgressState(this.session);
         this.transitionTo(inProgressState);
 
-        const { SubmittedState } = await import('./SubmittedState.js');
         const submittedState = new SubmittedState(this.session);
         inProgressState.transitionTo(submittedState);
         return true;
@@ -159,12 +155,10 @@ export class RedirectingState extends SessionState {
       const step = strategy.detectStep(event.url, event.tab?.title || '');
       if (step.step !== 'unknown') {
         console.log(`[RedirectingState] Step detected on update: ${step.step}`);
-        const { InProgressState } = await import('./InProgressState.js');
         const inProgressState = new InProgressState(this.session);
         this.transitionTo(inProgressState);
 
         if (step.step === 'success') {
-          const { SubmittedState } = await import('./SubmittedState.js');
           const submittedState = new SubmittedState(this.session);
           inProgressState.transitionTo(submittedState);
           return true;
@@ -183,7 +177,6 @@ export class RedirectingState extends SessionState {
     console.log(`[RedirectingState] ❌ Tab removed: ${event.tabId}`);
     console.log(`[RedirectingState]   Job: ${this.session.jobTitle}`);
 
-    const { AbandonedState } = await import('./AbandonedState.js');
     const abandonedState = new AbandonedState(this.session, 'tab_closed_before_load');
     this.transitionTo(abandonedState);
     return true;
@@ -195,12 +188,10 @@ export class RedirectingState extends SessionState {
   async handleStepDetected(event) {
     console.log(`[RedirectingState] Step detected: ${event.step}`);
 
-    const { InProgressState } = await import('./InProgressState.js');
     const inProgressState = new InProgressState(this.session);
     this.transitionTo(inProgressState);
 
     if (event.step === 'success') {
-      const { SubmittedState } = await import('./SubmittedState.js');
       const submittedState = new SubmittedState(this.session);
       inProgressState.transitionTo(submittedState);
       return true;
@@ -214,7 +205,6 @@ export class RedirectingState extends SessionState {
   async handleTimeout(event) {
     console.log(`[RedirectingState] ⏰ Redirection timed out for: ${this.session.jobTitle}`);
 
-    const { AbandonedState } = await import('./AbandonedState.js');
     const abandonedState = new AbandonedState(this.session, 'timeout_during_redirect');
     this.transitionTo(abandonedState);
     return true;
@@ -251,7 +241,6 @@ export class RedirectingState extends SessionState {
         }
       } catch (error) {
         console.log(`[RedirectingState] Tab no longer exists: ${this.session.redirectTabId}`);
-        const { AbandonedState } = await import('./AbandonedState.js');
         const abandonedState = new AbandonedState(this.session, 'tab_not_found');
         this.transitionTo(abandonedState);
       }

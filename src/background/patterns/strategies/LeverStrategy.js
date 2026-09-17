@@ -91,6 +91,9 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a Lever URL
    */
   canHandle(url) {
+    // ✅ NULL CHECK
+    if (!url) return false;
+
     const patterns = [
       /lever\.co/,
       /jobs\.lever\.co/
@@ -120,6 +123,9 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a success page
    */
   isSuccessPage(url) {
+    // ✅ NULL CHECK
+    if (!url) return false;
+
     const urlLower = url.toLowerCase();
 
     // First check for Lever-specific success URL patterns
@@ -148,6 +154,16 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @returns {Object} { step: string, label: string, pattern: string, matchedPattern: string }
    */
   detectStep(url, pageTitle) {
+    // ✅ NULL CHECK
+    if (!url) {
+      return {
+        step: 'unknown',
+        label: 'Unknown Step',
+        pattern: 'none',
+        matchedPattern: null
+      };
+    }
+
     const urlLower = url.toLowerCase();
     const titleLower = pageTitle ? pageTitle.toLowerCase() : '';
 
@@ -330,6 +346,9 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if success indicators are found
    */
   containsSuccessIndicators(pageContent, pageTitle) {
+    // ✅ NULL CHECK
+    if (!pageContent && !pageTitle) return false;
+
     // Check title
     if (pageTitle) {
       for (const pattern of this.successPatterns.titlePatterns) {
@@ -370,6 +389,9 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @returns {string|null} Job ID or null
    */
   extractJobIdFromUrl(url) {
+    // ✅ NULL CHECK
+    if (!url) return null;
+
     try {
       // Lever URL patterns: jobs.lever.co/company/job-id
       const patterns = [
@@ -396,6 +418,9 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a job listing page
    */
   isJobListingPage(url) {
+    // ✅ NULL CHECK
+    if (!url) return false;
+
     try {
       const urlObj = new URL(url);
       const pathname = urlObj.pathname;

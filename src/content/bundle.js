@@ -3,6 +3,76 @@
 
 import { detectorFactory } from './detectors/detector-factory.js';
 
+
+// ============================================
+// JOB PAGE GUARD
+// ============================================
+
+function isJobPage() {
+  try {
+    const url = window.location.href.toLowerCase();
+    const text = (document.body?.innerText || '').toLowerCase();
+
+    // 1. URL SIGNALS
+    const urlPatterns = [
+      'gh_jid=', 'gh_src=',
+      '/careers/', '/careers',
+      '/jobs/', '/jobs',
+      '/job/', '/job-apply',
+      '/positions/', '/position/',
+      '/apply',
+      'greenhouse.io', 'lever.co', 'myworkdayjobs.com', 'workday.com',
+      'ashbyhq.com', 'smartrecruiters.com', 'icims.com', 'bamboohr.com',
+      'taleo.net', 'deel.com', 'comeet.com',
+      'linkedin.com/jobs', 'naukri.com/job'
+    ];
+
+    if (urlPatterns.some(p => url.includes(p))) {
+      return true;
+    }
+
+    // 2. DOM SIGNALS
+    const titleSelectors = [
+      'h1', '[class*="job-title"]', '[class*="position-title"]',
+      '[itemprop="title"]', '[data-job-title]'
+    ];
+    const hasTitle = titleSelectors.some(s => document.querySelector(s));
+
+    const companySelectors = [
+      '[class*="company"]', '[class*="employer"]',
+      '[itemprop="hiringOrganization"]', '[data-company]'
+    ];
+    const hasCompany = companySelectors.some(s => document.querySelector(s));
+
+    const applySelectors = [
+      'button[class*="apply"]', 'a[class*="apply"]',
+      '[data-test-apply-button]', 'a[href*="apply"]',
+      'button[aria-label*="Apply"]', 'a[aria-label*="Apply"]'
+    ];
+    const hasApply = applySelectors.some(s => document.querySelector(s));
+
+    const structuralSignals = [hasTitle, hasCompany, hasApply].filter(Boolean).length;
+    if (structuralSignals >= 2) {
+      return true;
+    }
+
+    // 3. TEXT SIGNALS
+    const textSignals = [
+      'apply for this job', 'apply now', 'submit application',
+      'job description', 'responsibilities', 'qualifications', 'we are looking for'
+    ];
+
+    if (textSignals.some(s => text.includes(s))) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+
 // ============================================
 // MAIN JOBPULSE CLASS
 // ============================================
@@ -487,59 +557,321 @@ class JobPulse {
 }
 
 // ============================================
-// INITIALIZE
+// SUCCESS DETECTOR (Content + Iframe)
 // ============================================
 
-console.log('[JobPulse] Initializing content script...');
+/**
+ * Success Detector
+ *
+ * Detects application success by:
+ * 1. Reading page text for success phrases (works in modals, iframes)
+ * 2. Checking iframe URL for confirmation paths
+ * 3. Keyword-based detection (combines words like thank + apply)
+ *
+ * Runs in both main frame and iframes (via manifest all_frames: true)
+ */
+class SuccessDetector {
+  constructor() {
+    this.detected = false;
+    this.observer = null;
+    this.intervalId = null;
+    this.isIframe = window !== window.top;
+    this.startWatching();
+  }
 
-const marker = document.createElement('meta');
-marker.name = 'jobpulse-injected';
-marker.content = 'true';
-document.head.appendChild(marker);
+  startWatching() {
+    console.log(`[JobPulse] SuccessDetector starting (${this.isIframe ? 'iframe' : 'main frame'})`);
+    console.log(`[JobPulse]   URL: ${window.location.href}`);
 
-const jobpulse = new JobPulse();
+    // Watch for DOM changes
+    this.observer = new MutationObserver(() => {
+      if (this.detected) return;
+      this.checkForSuccess();
+    });
 
-// ============================================
-// EXPOSE TO PAGE CONTEXT
-// ============================================
+    if (document.body) {
+      this.observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+    }
 
-const originalDetect = jobpulse.detect.bind(jobpulse);
-jobpulse.detect = async function() {
-  console.log('[JobPulse] Detecting (with page exposure)...');
-  await originalDetect();
-  if (this.currentJob) {
-    document.body.dataset.jobpulseJob = JSON.stringify(this.currentJob);
-    const indicator = document.getElementById('jobpulse-indicator');
-    if (indicator) {
-      indicator.dataset.job = JSON.stringify(this.currentJob);
+    // Check immediately
+    this.checkForSuccess();
+
+    // Check periodically (in case DOM is slow)
+    this.intervalId = setInterval(() => {
+      if (this.detected) {
+        clearInterval(this.intervalId);
+        return;
+      }
+      this.checkForSuccess();
+    }, 2000);
+
+    // Stop after 10 minutes (safety)
+    setTimeout(() => {
+      if (this.intervalId) clearInterval(this.intervalId);
+      if (this.observer) this.observer.disconnect();
+    }, 600000);
+  }
+
+  checkForSuccess() {
+    if (this.detected) return;
+
+    // ============================================
+    // METHOD 1: Check iframe URL first (fastest)
+    // ============================================
+    if (this.isIframe) {
+      const iframeUrl = window.location.href.toLowerCase();
+      if (iframeUrl.includes('/confirmation') ||
+          iframeUrl.includes('/thank-you') ||
+          iframeUrl.includes('/success') ||
+          iframeUrl.includes('/submitted')) {
+        console.log(`[JobPulse] 🎉 Success detected via iframe URL: ${window.location.href}`);
+        this.markAsDetected('iframe_url', 'Application confirmation page');
+        return;
+      }
+    }
+
+    // ============================================
+    // METHOD 2: Keyword-based detection
+    // ============================================
+    const pageText = (document.body?.innerText || '').toLowerCase();
+    const result = this.detectSuccessByKeywords(pageText);
+
+    if (result.detected) {
+      console.log(`[JobPulse] 🎉 Success detected via keywords: ${result.reason} (${this.isIframe ? 'iframe' : 'main frame'})`);
+      this.markAsDetected('keywords', result.reason);
+      return;
+    }
+
+    // ============================================
+    // METHOD 3: Exact phrases (backup)
+    // ============================================
+    const successPhrases = [
+      'thank you for applying',
+      'thanks for applying',
+      'your application has been received',
+      'your application was successfully submitted',
+      'application submitted successfully',
+      'we have received your application',
+      'you have successfully applied',
+      'application received',
+      'successfully applied',
+      'application complete',
+      'application has been submitted',
+      'we will review your application'
+    ];
+
+    for (const phrase of successPhrases) {
+      if (pageText.includes(phrase)) {
+        console.log(`[JobPulse] 🎉 Success detected in text: "${phrase}" (${this.isIframe ? 'iframe' : 'main frame'})`);
+        this.markAsDetected('content', phrase);
+        return;
+      }
     }
   }
-};
 
-const originalStoreJob = jobpulse.storeJob.bind(jobpulse);
-jobpulse.storeJob = function(job) {
-  originalStoreJob(job);
-  document.body.dataset.jobpulseJob = JSON.stringify(job);
-  const indicator = document.getElementById('jobpulse-indicator');
-  if (indicator) {
-    indicator.dataset.job = JSON.stringify(job);
+  /**
+   * Detect success by keyword combinations
+   * @param {string} text - Page text (lowercase)
+   * @returns {Object} { detected: boolean, reason: string }
+   */
+  detectSuccessByKeywords(text) {
+    // Guard: text must be non-empty and reasonably short
+    if (!text || text.length < 10) return { detected: false };
+    if (text.length > 5000) return { detected: false }; // Too long = job description
+
+    // Guard: check for job description signals
+    const jobDescSignals = [
+      'responsibilities:',
+      'requirements:',
+      'qualifications:',
+      'about the role',
+      'what you\'ll do',
+      'we are looking for',
+      'job description'
+    ];
+    if (jobDescSignals.some(s => text.includes(s))) {
+      return { detected: false };
+    }
+
+    // ============================================
+    // Rule 1: Thank + Action
+    // ============================================
+    const thankWords = ['thank you', 'thanks for', 'thanks!', 'we appreciate'];
+    const actionWords = [
+      'applying', 'apply', 'application', 'submission',
+      'submitting', 'submitted', 'cv', 'resume'
+    ];
+
+    const hasThank = thankWords.some(w => text.includes(w));
+    const hasAction = actionWords.some(w => text.includes(w));
+
+    if (hasThank && hasAction) {
+      return { detected: true, reason: 'thank_you_apply' };
+    }
+
+    // ============================================
+    // Rule 2: Received + Application
+    // ============================================
+    const receiveWords = ['received', 'recieved'];
+    const appWords = ['application', 'submission', 'cv', 'resume'];
+
+    const hasReceive = receiveWords.some(w => text.includes(w));
+    const hasApp = appWords.some(w => text.includes(w));
+
+    if (hasReceive && hasApp) {
+      return { detected: true, reason: 'received_application' };
+    }
+
+    // ============================================
+    // Rule 3: Submitted + Success
+    // ============================================
+    const submitWords = ['submitted', 'submission complete'];
+    const successWords = ['successfully', 'complete', 'confirmed', 'confirmation'];
+
+    const hasSubmit = submitWords.some(w => text.includes(w));
+    const hasSuccess = successWords.some(w => text.includes(w));
+
+    if (hasSubmit && hasSuccess) {
+      return { detected: true, reason: 'submitted_successfully' };
+    }
+
+    // ============================================
+    // Rule 4: Strong single phrases (fallback)
+    // ============================================
+    const strongPhrases = [
+      'application submitted',
+      'application received',
+      'application complete',
+      'successfully applied',
+      'we have your application',
+      'cv submitted',
+      'resume submitted'
+    ];
+
+    for (const phrase of strongPhrases) {
+      if (text.includes(phrase)) {
+        return { detected: true, reason: phrase };
+      }
+    }
+
+    return { detected: false };
   }
-};
 
-if (jobpulse.currentJob) {
-  document.body.dataset.jobpulseJob = JSON.stringify(jobpulse.currentJob);
+  markAsDetected(detectionMethod, phrase) {
+    if (this.detected) return;
+    this.detected = true;
+
+    console.log(`[JobPulse] Success detection: method=${detectionMethod}, phrase="${phrase}"`);
+
+    // Send to background
+    try {
+      chrome.runtime.sendMessage({
+        type: 'SUCCESS_DETECTED',
+        payload: {
+          phrase: phrase,
+          url: window.location.href,
+          pageTitle: document.title,
+          isIframe: this.isIframe,
+          detectionMethod: detectionMethod,
+          detectedAt: Date.now()
+        }
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[JobPulse] Send success error:', chrome.runtime.lastError);
+        } else {
+          console.log('[JobPulse] ✅ Success sent to background');
+        }
+      });
+    } catch (e) {
+      console.warn('[JobPulse] Could not send success to background:', e);
+    }
+
+    // Cleanup
+    if (this.observer) this.observer.disconnect();
+    if (this.intervalId) clearInterval(this.intervalId);
+  }
 }
 
-window.addEventListener('jobpulse-job-update', (event) => {
-  if (event.detail && event.detail.job) {
-    console.log('[JobPulse] Job update from page event:', event.detail.job);
-    jobpulse.currentJob = event.detail.job;
-    jobpulse.storeJob(event.detail.job);
-  }
-});
+// ============================================
+// INITIALIZE (with job page guard)
+// ============================================
 
-console.log('[JobPulse] ✅ Ready!');
-console.log('[JobPulse] 📌 Commands:');
-console.log('[JobPulse]   📍 Get job: JSON.parse(document.body.dataset.jobpulseJob || "null")');
-console.log('[JobPulse]   📍 Get apply data: JSON.parse(document.body.dataset.jobpulseApply || "null")');
-console.log('[JobPulse]   📍 Force refresh: window.dispatchEvent(new CustomEvent("jobpulse-refresh"))');
+console.log('[JobPulse] Content script loaded on:', window.location.href);
+
+if (isJobPage()) {
+  console.log('[JobPulse] ✅ Job page detected, initializing...');
+
+  // ============================================
+  // INITIALIZE
+  // ============================================
+
+  const marker = document.createElement('meta');
+  marker.name = 'jobpulse-injected';
+  marker.content = 'true';
+  document.head.appendChild(marker);
+
+  const jobpulse = new JobPulse();
+
+  // ============================================
+  // EXPOSE TO PAGE CONTEXT
+  // ============================================
+
+  const originalDetect = jobpulse.detect.bind(jobpulse);
+  jobpulse.detect = async function() {
+    console.log('[JobPulse] Detecting (with page exposure)...');
+    await originalDetect();
+    if (this.currentJob) {
+      document.body.dataset.jobpulseJob = JSON.stringify(this.currentJob);
+      const indicator = document.getElementById('jobpulse-indicator');
+      if (indicator) {
+        indicator.dataset.job = JSON.stringify(this.currentJob);
+      }
+    }
+  };
+
+  const originalStoreJob = jobpulse.storeJob.bind(jobpulse);
+  jobpulse.storeJob = function(job) {
+    originalStoreJob(job);
+    document.body.dataset.jobpulseJob = JSON.stringify(job);
+    const indicator = document.getElementById('jobpulse-indicator');
+    if (indicator) {
+      indicator.dataset.job = JSON.stringify(job);
+    }
+  };
+
+  if (jobpulse.currentJob) {
+    document.body.dataset.jobpulseJob = JSON.stringify(jobpulse.currentJob);
+  }
+
+  window.addEventListener('jobpulse-job-update', (event) => {
+    if (event.detail && event.detail.job) {
+      console.log('[JobPulse] Job update from page event:', event.detail.job);
+      jobpulse.currentJob = event.detail.job;
+      jobpulse.storeJob(event.detail.job);
+    }
+  });
+
+  // ============================================
+  // INITIALIZE SUCCESS DETECTOR
+  // ============================================
+
+  try {
+    const successDetector = new SuccessDetector();
+    console.log('[JobPulse] SuccessDetector initialized');
+  } catch (error) {
+    console.error('[JobPulse] Failed to initialize SuccessDetector:', error);
+  }
+
+  console.log('[JobPulse] ✅ Ready!');
+  console.log('[JobPulse] 📌 Commands:');
+  console.log('[JobPulse]   📍 Get job: JSON.parse(document.body.dataset.jobpulseJob || "null")');
+  console.log('[JobPulse]   📍 Get apply data: JSON.parse(document.body.dataset.jobpulseApply || "null")');
+  console.log('[JobPulse]   📍 Force refresh: window.dispatchEvent(new CustomEvent("jobpulse-refresh"))');
+
+} else {
+  console.log('[JobPulse] Not a job page, exiting');
+}

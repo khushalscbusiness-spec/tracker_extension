@@ -1,6 +1,9 @@
 // src/background/patterns/states/InitiatedState.js
 
 import { SessionState } from '../base/SessionState.js';
+import { RedirectingState } from './RedirectingState.js';
+import { AbandonedState } from './AbandonedState.js';
+
 
 /**
  * Initiated State
@@ -84,7 +87,6 @@ export class InitiatedState extends SessionState {
     // If the tab has a URL matching our redirect URL
     if (event.tab && event.tab.url && event.tab.url.includes(this.session.redirectUrl)) {
       // Transition to RedirectingState
-      const { RedirectingState } = await import('./RedirectingState.js');
       const redirectingState = new RedirectingState(this.session);
       this.transitionTo(redirectingState);
       return true;
@@ -103,7 +105,6 @@ export class InitiatedState extends SessionState {
     // If the URL matches our redirect URL
     if (event.url && event.url.includes(this.session.redirectUrl)) {
       // Transition to RedirectingState
-      const { RedirectingState } = await import('./RedirectingState.js');
       const redirectingState = new RedirectingState(this.session);
       this.transitionTo(redirectingState);
       return true;
@@ -120,7 +121,6 @@ export class InitiatedState extends SessionState {
     console.log(`[InitiatedState]   Job: ${this.session.jobTitle}`);
 
     // Transition to AbandonedState
-    const { AbandonedState } = await import('./AbandonedState.js');
     const abandonedState = new AbandonedState(this.session, 'timeout');
     this.transitionTo(abandonedState);
     return true;

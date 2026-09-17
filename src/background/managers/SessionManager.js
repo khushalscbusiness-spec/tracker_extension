@@ -390,14 +390,6 @@ export class SessionManager {
    * @param {number} tabId - Tab ID
    * @returns {string|null} Session ID or null
    */
-  getSessionIdByTabId(tabId) {
-    for (const [sessionId, session] of this.sessions) {
-      if (session.trackedTabs && session.trackedTabs.includes(tabId)) {
-        return sessionId;
-      }
-    }
-    return null;
-  }
 
   // ============================================
   // SESSION REMOVAL
