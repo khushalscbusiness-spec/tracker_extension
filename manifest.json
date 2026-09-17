@@ -11,8 +11,7 @@
     "notifications"
   ],
   "host_permissions": [
-    "https://www.linkedin.com/*",
-    "https://www.naukri.com/*"
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "src/background/service-worker.js",
@@ -28,14 +27,10 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://www.linkedin.com/jobs/*",
-        "https://www.linkedin.com/jobs/search-results/*",
-        "https://www.linkedin.com/jobs/view/*",
-        "https://www.naukri.com/*"
-      ],
+      "matches": ["<all_urls>"],
       "js": ["src/content/bundle.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "icons": {
