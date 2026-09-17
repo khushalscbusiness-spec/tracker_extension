@@ -4,45 +4,140 @@ import fs from 'fs';
 import path from 'path';
 
 const isWatch = process.argv.includes('--watch');
+const BUILD_ENV = process.env.NODE_ENV || 'development';
+const isProduction = BUILD_ENV === 'production';
 
-console.log('🏗️  Building JobPulse Extension...');
+console.log(`🏗️  Building JobPulse Extension (${BUILD_ENV})...`);
 
 // Ensure dist directory exists
 if (!fs.existsSync('dist')) {
   fs.mkdirSync('dist', { recursive: true });
 }
 
-// Build content scripts
-const buildOptions = {
+// ============================================
+// ENV RESOLUTION
+// At build time, intercept imports of './env/active.js' and redirect
+// them to the correct env file. The source never names an env.
+// ============================================
+
+const ENV_FILE_MAP = {
+  development: 'development.js',
+  staging: 'staging.js',
+  production: 'production.js'
+};
+
+if (!ENV_FILE_MAP[BUILD_ENV]) {
+  console.error(`❌ Unknown BUILD_ENV: ${BUILD_ENV}`);
+  console.error(`   Expected one of: ${Object.keys(ENV_FILE_MAP).join(', ')}`);
+  process.exit(1);
+}
+
+const activeEnvFile = ENV_FILE_MAP[BUILD_ENV];
+console.log(`🎯 Active env file: env/${activeEnvFile}`);
+
+/**
+ * esbuild plugin: intercept any import path ending in './env/active.js'
+ * and redirect it to './env/<BUILD_ENV>.js'.
+ *
+ * This keeps the source env-neutral — nothing in src/ names a specific env.
+ */
+const envAliasPlugin = {
+  name: 'env-alias',
+  setup(build) {
+    build.onResolve({ filter: /\/env\/active\.js$/ }, (args) => {
+      // Replace 'active.js' with the real env file, then resolve to an absolute path
+      const replaced = args.path.replace(/\/env\/active\.js$/, `/env/${activeEnvFile}`);
+      const absolutePath = path.resolve(args.resolveDir, replaced);
+      return { path: absolutePath, external: false };
+    });
+  }
+};
+
+// ============================================
+// BUILD OPTIONS
+// ============================================
+
+// Content script — IIFE (runs in page context, no module support)
+const contentBuildOptions = {
   entryPoints: ['src/content/bundle.js'],
   bundle: true,
   outfile: 'dist/src/content/bundle.js',
   format: 'iife',
   platform: 'browser',
   target: ['chrome90'],
-  minify: false,
-  sourcemap: false,
+  minify: isProduction,
+  sourcemap: !isProduction,
   logLevel: 'info',
   external: ['chrome'],
+  plugins: [envAliasPlugin],
+  define: {
+    BUILD_ENV: JSON.stringify(BUILD_ENV)
+  }
 };
+
+// Service worker — ESM (MV3 requires "type": "module")
+const serviceWorkerBuildOptions = {
+  entryPoints: ['src/background/service-worker.js'],
+  bundle: true,
+  outfile: 'dist/src/background/service-worker.js',
+  format: 'esm',
+  platform: 'browser',
+  target: ['chrome90'],
+  minify: isProduction,
+  sourcemap: !isProduction,
+  logLevel: 'info',
+  external: ['chrome'],
+  plugins: [envAliasPlugin],
+  define: {
+    BUILD_ENV: JSON.stringify(BUILD_ENV)
+  }
+};
+
+// ============================================
+// BUILD
+// ============================================
 
 if (isWatch) {
   console.log('👀 Watching for changes...');
-  const context = await esbuild.context(buildOptions);
-  await context.watch();
+
+  const contentCtx = await esbuild.context(contentBuildOptions);
+  const swCtx = await esbuild.context(serviceWorkerBuildOptions);
+  await contentCtx.watch();
+  await swCtx.watch();
+
+  console.log('✅ Watching — source files are never mutated');
 } else {
-  await esbuild.build(buildOptions);
+  // 1. Content script
+  await esbuild.build(contentBuildOptions);
   console.log('✅ Content scripts bundled!');
 
-  // Copy other files
+  // 2. Service worker
+  await esbuild.build(serviceWorkerBuildOptions);
+  console.log('✅ Service worker bundled!');
+
+  // 3. Static files
   copyFiles();
+
+  // 4. Post-build sanity check
+  verifyNoDevUrlsInProd();
 }
+
+// ============================================
+// COPY STATIC FILES
+// ============================================
 
 function copyFiles() {
   console.log('📦 Copying files...');
 
   // Create dist directories
-  const dirs = ['icons', 'config', 'src/api', 'src/background', 'src/popup', 'src/state', 'src/utils'];
+  const dirs = [
+    'icons',
+    'src/api',
+    'src/background',
+    'src/popup',
+    'src/state',
+    'src/utils'
+  ];
   for (const dir of dirs) {
     const destPath = `dist/${dir}`;
     if (!fs.existsSync(destPath)) {
@@ -55,13 +150,11 @@ function copyFiles() {
     fs.cpSync('icons', 'dist/icons', { recursive: true });
   }
 
-  // Copy config
-  if (fs.existsSync('config')) {
-    fs.cpSync('config', 'dist/config', { recursive: true });
-  }
-
-  // Copy src files (excluding content which we already bundled)
-  const srcDirs = ['api', 'background', 'popup', 'state', 'utils'];
+  // Copy src files
+  // NOTE: `background` is excluded — the service worker is bundled, not copied.
+  // NOTE: `content` is excluded — the content script is bundled, not copied.
+  // NOTE: `config` is excluded — config is resolved at build time via the env plugin.
+  const srcDirs = ['api', 'popup', 'state', 'utils'];
   for (const dir of srcDirs) {
     const srcPath = `src/${dir}`;
     const destPath = `dist/src/${dir}`;
@@ -79,4 +172,50 @@ function copyFiles() {
   }
 
   console.log('✅ Files copied!');
+}
+
+// ============================================
+// POST-BUILD SANITY CHECK
+// ============================================
+
+function verifyNoDevUrlsInProd() {
+  if (!isProduction) {
+    console.log('ℹ️  Skipping sanity check (non-production build)');
+    return;
+  }
+
+  const bundles = [
+    'dist/src/background/service-worker.js',
+    'dist/src/content/bundle.js'
+  ];
+
+  const forbidden = [
+    'localhost:8000',
+    'localhost:3000',
+    'staging-api.jobpulse.io',
+    'staging.jobpulse.io'
+  ];
+
+  const violations = [];
+
+  for (const file of bundles) {
+    if (!fs.existsSync(file)) continue;
+    const content = fs.readFileSync(file, 'utf8');
+    for (const url of forbidden) {
+      if (content.includes(url)) {
+        violations.push(`${file} contains "${url}"`);
+      }
+    }
+  }
+
+  if (violations.length > 0) {
+    console.error('\n❌ PRODUCTION BUILD CONTAINS DEV/STAGING URLS:');
+    for (const v of violations) {
+      console.error(`   - ${v}`);
+    }
+    console.error('\n   This means the env alias failed.\n');
+    process.exit(1);
+  }
+
+  console.log('✅ Production sanity check passed — no dev/staging URLs in bundle');
 }

@@ -1,6 +1,7 @@
 // src/background/patterns/states/SubmittedState.js
 
 import { SessionState } from '../base/SessionState.js';
+import { getApiUrl } from '../../../config/config.js';
 
 /**
  * Submitted State
@@ -46,7 +47,7 @@ export class SubmittedState extends SessionState {
     console.log(`[SubmittedState]   URLs tracked: ${this.session.visitedUrls ? this.session.visitedUrls.length : 0}`);
     console.log(`[SubmittedState]   Time taken: ${this.calculateTotalTime()}`);
 
-    // ✅ Log job ID information
+    // Log job ID information
     if (this.session.jobIds && Object.keys(this.session.jobIds).length > 0) {
       console.log(`[SubmittedState]   Job IDs:`, this.session.jobIds);
     }
@@ -175,7 +176,7 @@ export class SubmittedState extends SessionState {
     // Build URL chain with full details including job IDs
     const urlChain = this.buildUrlChain();
 
-    // ✅ Get all job IDs
+    // Get all job IDs
     const jobIds = this.session.jobIds || {};
     const externalJobId = this.session.externalJobId || null;
     const applicationReference = this.session.applicationReference || null;
@@ -188,7 +189,7 @@ export class SubmittedState extends SessionState {
       location: this.session.location || null,
       jobUrl: this.session.jobUrl,
 
-      // ✅ Job ID Tracking
+      // Job ID Tracking
       linkedInJobId: this.session.jobId,
       externalJobId: externalJobId,
       jobIds: jobIds,
@@ -204,7 +205,7 @@ export class SubmittedState extends SessionState {
       thankYouPhrase: this.session.thankYouPhrase || null,
       confirmationMessage: this.session.confirmationMessage || null,
 
-      // ✅ Complete URL Chain (includes order, label, jobId, timestamp, tabId, title)
+      // Complete URL Chain
       urlChain: urlChain,
 
       // Timing Information
@@ -339,22 +340,28 @@ export class SubmittedState extends SessionState {
       .join(', ');
   }
 
+  // ============================================
+  // BACKEND COMMUNICATION
+  // ============================================
+
   /**
    * Send payload to backend
    * @param {Object} payload - The payload to send
-   * @returns {Promise} API response
+   * @returns {Promise<Object>} API response
    */
   async sendToBackend(payload) {
-    // Get API URL from config
-    const config = await this.getConfig();
-    const apiUrl = config.API_URL || 'http://localhost:8000/api/v1';
+    const apiUrl = await this.resolveApiUrl();
     const endpoint = '/applications/track';
+
+    console.log(`[SubmittedState] POST ${apiUrl}${endpoint}`);
+
+    const token = await this.getAuthToken();
 
     const response = await fetch(`${apiUrl}${endpoint}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${await this.getAuthToken()}`
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
       },
       body: JSON.stringify(payload)
     });
@@ -365,6 +372,33 @@ export class SubmittedState extends SessionState {
     }
 
     return response.json();
+  }
+
+  /**
+   * Resolve the API URL from config.
+   * Priority:
+   *   1. chrome.storage.local.user_config.API_URL (runtime override)
+   *   2. Build-time config from the active env file (imported statically)
+   * @returns {Promise<string>} API base URL
+   */
+  async resolveApiUrl() {
+    // 1. Runtime override from storage
+    try {
+      const result = await chrome.storage.local.get('user_config');
+      const userConfig = result.user_config;
+      if (userConfig && userConfig.API_URL) {
+        return userConfig.API_URL;
+      }
+    } catch (e) {
+      console.warn('[SubmittedState] Could not read user_config from storage:', e);
+    }
+
+    // 2. Build-time config
+    const apiUrl = getApiUrl();
+    if (!apiUrl) {
+      throw new Error('[SubmittedState] No API URL configured');
+    }
+    return apiUrl;
   }
 
   /**
@@ -416,20 +450,6 @@ export class SubmittedState extends SessionState {
       console.log(`[SubmittedState] Failed payload stored for retry`);
     } catch (error) {
       console.warn(`[SubmittedState] Could not store failed payload:`, error);
-    }
-  }
-
-  /**
-   * Get configuration
-   * @returns {Object} Config object
-   */
-  async getConfig() {
-    try {
-      const result = await chrome.storage.local.get('config');
-      return result.config || {};
-    } catch (error) {
-      console.warn(`[SubmittedState] Could not get config:`, error);
-      return {};
     }
   }
 

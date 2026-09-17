@@ -1,76 +1,99 @@
 // src/config/config.js
+// Pure ESM config loader — Chrome MV3 safe (no require, no process.env)
+//
+// The active env file is chosen at BUILD TIME by build.js via an esbuild plugin.
+// In source, we always import './env/active.js' — the plugin rewrites this
+// import to point at the correct env file for the target build.
+
+import envConfig from './env/active.js';
 import { STORAGE } from '../utils/storage.js';
 
-// Default configuration - embedded in code
-const DEFAULT_CONFIG = {
-  API_URL: 'http://localhost:8000/api/v1',
-  WEBSITE_URL: 'http://localhost:3000',
-  DASHBOARD_URL: 'http://localhost:3000/dashboard',
-  DEBUG: true,
-  LOG_LEVEL: 'debug',
-  BACKEND_TIMEOUT: 30000,
-  RETRY_ATTEMPTS: 3,
-  RETRY_DELAY: 1000,
-  PLATFORMS: {
-    linkedin: { enabled: true },
-    naukri: { enabled: true },
-    greenhouse: { enabled: true },
-    lever: { enabled: true },
-    workday: { enabled: true }
-  },
-  FEATURES: {
-    spaNavigation: true,
-    autoDeduplicate: true,
-    trackApplications: true,
-    jobIntelligence: false,
-    aiAssistance: false
-  }
+// ============================================
+// STATIC CONFIG (does not change per env)
+// ============================================
+
+const PLATFORMS = {
+  linkedin:    { enabled: true, baseUrl: 'https://www.linkedin.com', jobPattern: '/jobs/view/' },
+  naukri:      { enabled: true, baseUrl: 'https://www.naukri.com',   jobPattern: '/job-listings/' },
+  greenhouse:  { enabled: true, baseUrl: 'https://boards.greenhouse.io' },
+  lever:       { enabled: true, baseUrl: 'https://lever.co' },
+  workday:     { enabled: true, baseUrl: 'https://myworkdayjobs.com' }
 };
 
-let currentConfig = { ...DEFAULT_CONFIG };
+const FEATURES = {
+  spaNavigation: true,
+  autoDeduplicate: true,
+  trackApplications: true,
+  jobIntelligence: false,
+  aiAssistance: false
+};
+
+// ============================================
+// RUNTIME STATE
+// ============================================
+
+let currentConfig = null;
 let configLoaded = false;
 
-export async function loadConfig() {
-  if (configLoaded) return currentConfig;
+// ============================================
+// PUBLIC API
+// ============================================
 
+export async function loadConfig() {
+  if (configLoaded && currentConfig) return currentConfig;
+
+  const baseConfig = {
+    ...envConfig,
+    ENVIRONMENT: envConfig.ENVIRONMENT || 'unknown',
+    IS_DEVELOPMENT: envConfig.API_URL?.includes('localhost') || false,
+    IS_STAGING:     envConfig.API_URL?.includes('staging') || false,
+    IS_PRODUCTION:  envConfig.API_URL?.includes('api.jobpulse.io') || false,
+    PLATFORMS,
+    FEATURES
+  };
+
+  // Try to load user overrides from chrome.storage
+  let userConfig = null;
   try {
-    // Try to load user overrides from storage
-    const storedConfig = await STORAGE.get('user_config');
-    if (storedConfig) {
-      currentConfig = { ...DEFAULT_CONFIG, ...storedConfig };
-      console.log('[Config] Loaded user config from storage');
-    } else {
-      console.log('[Config] Using default config');
-      // Save default config to storage for future use
-      await STORAGE.set('user_config', DEFAULT_CONFIG);
-    }
-  } catch (error) {
-    console.warn('[Config] Error loading config, using defaults:', error);
-    currentConfig = { ...DEFAULT_CONFIG };
+    userConfig = await STORAGE.get('user_config');
+  } catch (e) {
+    console.warn('[Config] Could not load user config from storage:', e);
   }
 
+  currentConfig = userConfig
+    ? { ...baseConfig, ...userConfig }
+    : { ...baseConfig };
+
   configLoaded = true;
+  console.log('[Config] Loaded:', currentConfig.API_URL);
   return currentConfig;
 }
 
 export function getConfig() {
-  return currentConfig || DEFAULT_CONFIG;
+  if (!currentConfig) {
+    currentConfig = {
+      ...envConfig,
+      PLATFORMS,
+      FEATURES
+    };
+  }
+  return currentConfig;
 }
 
 export function getApiUrl() {
-  return getConfig().API_URL || DEFAULT_CONFIG.API_URL;
+  return getConfig().API_URL || envConfig.API_URL;
 }
 
 export function getWebsiteUrl() {
-  return getConfig().WEBSITE_URL || DEFAULT_CONFIG.WEBSITE_URL;
+  return getConfig().WEBSITE_URL || envConfig.WEBSITE_URL;
 }
 
 export function getDashboardUrl() {
-  return getConfig().DASHBOARD_URL || DEFAULT_CONFIG.DASHBOARD_URL;
+  return getConfig().DASHBOARD_URL || envConfig.DASHBOARD_URL;
 }
 
 export function isDebug() {
-  return getConfig().DEBUG || false;
+  return getConfig().DEBUG === true;
 }
 
 export function getLogLevel() {
@@ -78,13 +101,13 @@ export function getLogLevel() {
 }
 
 export function isPlatformEnabled(platform) {
-  const config = getConfig();
-  return config.PLATFORMS?.[platform]?.enabled !== false;
+  const cfg = getConfig();
+  return cfg.PLATFORMS?.[platform]?.enabled !== false;
 }
 
 export function isFeatureEnabled(feature) {
-  const config = getConfig();
-  return config.FEATURES?.[feature] === true;
+  const cfg = getConfig();
+  return cfg.FEATURES?.[feature] === true;
 }
 
 export async function updateConfig(newConfig) {
@@ -96,7 +119,6 @@ export async function updateConfig(newConfig) {
   return updated;
 }
 
-// For backward compatibility
 export default {
   loadConfig,
   getConfig,
