@@ -16,6 +16,7 @@ class Popup {
 
   async initialize() {
     this.cacheElements();
+    this.assertRequiredElements();
     this.setupEventListeners();
     await this.connectToBackground();
     await this.checkAuth();
@@ -46,11 +47,31 @@ class Popup {
       loginForm: document.getElementById('loginForm'),
       emailInput: document.getElementById('emailInput'),
       passwordInput: document.getElementById('passwordInput'),
+      loginBtn: document.getElementById('loginBtn'),
       loginError: document.getElementById('loginError'),
 
       dashboardLink: document.getElementById('dashboardLink'),
       signupLink: document.getElementById('signupLink')
     };
+  }
+
+  /**
+   * Fail loudly if any element expected by the popup is missing.
+   * Catches HTML/JS drift early in development.
+   */
+  assertRequiredElements() {
+    const required = [
+      'loginForm',
+      'emailInput',
+      'passwordInput',
+      'loginBtn',
+      'loginError'
+    ];
+    const missing = required.filter(key => !this.elements[key]);
+    if (missing.length > 0) {
+      console.error('[Popup] Missing required elements:', missing);
+      throw new Error(`Popup HTML is missing: ${missing.join(', ')}`);
+    }
   }
 
   setupEventListeners() {
@@ -172,6 +193,15 @@ class Popup {
     this.hideAllStates();
     this.elements.loginState.style.display = 'flex';
     this.elements.logoutBtn.style.display = 'none';
+
+    // Reset login button to a clean state
+    if (this.elements.loginBtn) {
+      this.elements.loginBtn.disabled = false;
+      this.elements.loginBtn.textContent = 'Sign In';
+    }
+    if (this.elements.loginError) {
+      this.elements.loginError.style.display = 'none';
+    }
   }
 
   showLoading() {

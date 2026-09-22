@@ -33,7 +33,7 @@ export class InProgressState extends SessionState {
     this.lastStepDetected = null;
     this.stepDetectionCount = 0;
     this.inactivityCount = 0;
-    this.maxInactivityCount = 600; // 10 minutes of no activity (600 seconds)
+    this.maxInactivityCount = 1800; // 30 minutes of no activity (1800 seconds)
   }
 
   /**
@@ -211,18 +211,22 @@ export class InProgressState extends SessionState {
   /**
    * Handle inactivity event
    */
-  async handleInactivity(event) {
+    async handleInactivity(event) {
     this.inactivityCount++;
-    console.log(`[InProgressState] ⚠️ Inactivity count: ${this.inactivityCount}/${this.maxInactivityCount}`);
+
+    // Log only once per minute to avoid console spam
+    if (this.inactivityCount % 60 === 0) {
+      const minutesInactive = Math.floor(this.inactivityCount / 60);
+      console.log(`[InProgressState] ⚠️ Inactive for ${minutesInactive} min (${this.inactivityCount}/${this.maxInactivityCount})`);
+    }
 
     if (this.inactivityCount >= this.maxInactivityCount) {
       console.log(`[InProgressState] ⏰ User inactive for ${this.maxInactivityCount / 60} minutes`);
       console.log(`[InProgressState]   Job: ${this.session.jobTitle}`);
 
-      // ✅ Stop the timer FIRST to prevent looping
+      // Stop the timer FIRST to prevent looping
       this.clearInactivityTimer();
 
-      // ✅ Use direct import instead of registry
       const abandonedState = new AbandonedState(this.session, 'inactivity');
       this.transitionTo(abandonedState);
       return true;

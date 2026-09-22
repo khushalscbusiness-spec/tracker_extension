@@ -7,3 +7,6 @@ structure.txt
 dist/
 node_modules/
 *.zip
+
+# Repo dumps
+repo_dump_*.txt

@@ -84,6 +84,10 @@ export function getApiUrl() {
   return getConfig().API_URL || envConfig.API_URL;
 }
 
+export function getReceiverUrl() {
+  return getConfig().RECEIVER_URL || envConfig.RECEIVER_URL;
+}
+
 export function getWebsiteUrl() {
   return getConfig().WEBSITE_URL || envConfig.WEBSITE_URL;
 }
@@ -123,6 +127,7 @@ export default {
   loadConfig,
   getConfig,
   getApiUrl,
+  getReceiverUrl,
   getWebsiteUrl,
   getDashboardUrl,
   isDebug,

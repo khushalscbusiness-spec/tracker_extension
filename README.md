@@ -1,898 +1,1210 @@
-# JobPulse Extension — Complete Project Reference
+# Layer 1 — Extension (JobPulse)
 
-> **Purpose of this document:** Hand this to any new chat/developer/AI and they should fully understand what JobPulse is, what's built, what's pending, and what's next.
-
----
-
-## 1. What Is JobPulse?
-
-JobPulse is a **Chrome extension** that **automatically tracks job applications** across job boards and ATS platforms, with **minimal manual input** from the user.
-
-The core promise: *"Apply to jobs anywhere. We'll track them automatically."*
+> **Purpose:** Reference for the Chrome MV3 extension. Defines the layer's contract, its flow from start to end, its file map, and its remaining work.
+>
+> **How to use this document:** If you are picking this up in a new chat or as a new developer, read §1–§3 first. Those are the only parts you must know before touching code.
 
 ---
 
-## 2. The Problem It Solves
+## Table of Contents
 
-| Problem | How JobPulse Solves It |
-|---------|------------------------|
-| Users apply to 50-200 jobs and lose track | Auto-detects and tracks every application |
-| Manual tracking in spreadsheets is tedious | Zero manual entry required |
-| Applications span multiple platforms (LinkedIn → company site → ATS) | Tracks the entire URL chain |
-| Success pages vary across 150+ ATS platforms | Multi-layer detection (URL, iframe, content, keywords) |
-| Duplicate applications | Job ID extraction + deduplication |
+1. The Rule
+2. Network Surface
+3. Architectural Diagram
+4. Start-to-End Flow
+5. Identity & JWT Model
+6. The Wire Payload & ReceiverAdapter
+7. Project Structure (Annotated)
+8. Session Lifecycle
+9. Message Types Reference
+10. ATS Platforms Supported
+11. Chrome MV3 Constraints
+12. Build System
+13. Environment Config
+14. Popup (Target State)
+15. Debugging Console Helpers
+16. Session Object Notes
+17. What's Broken / Needs Deletion
+18. What's Left To Do
+19. What the Extension Does Not Do
+20. Design Principles
+21. How to Continue in a New Chat
 
 ---
 
-## 3. Target Users
+## 1. The Rule
 
-- **Primary:** Active job seekers applying to 10-100+ jobs
-- **Secondary:** Career coaches, bootcamp students
-- **Geography:** India-first (Naukri, LinkedIn) + global (Greenhouse, Lever, Workday)
+**The extension writes to Layer 2. The extension reads from Layer 3 for auth only.**
+
+- **Writes** (events) → Layer 2A receiver at `:8001`
+- **Reads** (login, verify token) → Layer 3 at `:8000`
+- **Never** writes applications to Layer 3
+- **Never** reads application data from Layer 3
+
+The extension is a **pure producer**. It observes the browser, packages events, and ships them to Layer 2. Everything else — applications, analytics, companies — lives in Layer 3, and is read by the Layer 3 frontend, not the extension.
 
 ---
 
-## 4. Core Architecture
+## 2. Network Surface (Complete)
 
-### High-Level Flow
+| Call | Destination | Purpose | Auth |
+|---|---|---|---|
+| `POST /api/v1/auth/login` | Layer 3 | Get JWT | — |
+| `GET /api/v1/auth/me` | Layer 3 | Verify JWT still valid | Bearer |
+| `POST /receive/v1/events` | Layer 2A | Ship application event | Bearer |
+| `GET /health` | Layer 2A | Check receiver reachable | — |
+
+Four calls. Two layers. No crossover.
+
+**Two clients, one per layer:**
+
+| File | Layer | Direction |
+|---|---|---|
+| `src/api/client.js` | Layer 3 (`:8000`) | read (auth) |
+| `src/background/api/receiver-api.js` | Layer 2A (`:8001`) | write (events) |
+
+---
+
+## 3. Architectural Diagram
+
+### Component Diagram (static)
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CHROME EXTENSION                            │
-│                                                                 │
-│  Content Script → detects job, tracks apply clicks             │
-│  Background SW  → manages sessions, tracks tabs, detects success│
-│  Popup          → shows state, login, manual track              │
-│                                                                 │
-│  Sends data to backend                                          │
-└─────────────────────────┬───────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    BACKEND (Planned)                           │
-│                                                                 │
-│  - Receives application payloads                               │
-│  - Stores in database                                          │
-│  - Processes for analytics                                     │
-│  - Serves dashboard                                            │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            LAYER 1 — EXTENSION                              │
+│                                                                             │
+│  ┌─────────────────────────┐          ┌─────────────────────────────────┐   │
+│  │   POPUP                 │          │   SERVICE WORKER (MV3)          │   │
+│  │                         │          │                                 │   │
+│  │  popup.html             │          │  service-worker.js              │   │
+│  │  popup.js               │◄────────►│   • message router              │   │
+│  │   • login form          │  port    │   • tab change handler          │   │
+│  │   • session display     │          │   • auth handler                │   │
+│  │   • read-only           │          │   • popup port handler          │   │
+│  └─────────────────────────┘          │                                 │   │
+│                                       │  ┌───────────────────────────┐  │   │
+│                                       │  │ ApplicationTracker        │  │   │
+│                                       │  │  (orchestrator / facade)  │  │   │
+│                                       │  │   • session lifecycle     │  │   │
+│                                       │  │   • tab event routing     │  │   │
+│                                       │  │   • state transitions     │  │   │
+│                                       │  └────────────┬──────────────┘  │   │
+│                                       │               │                 │   │
+│                                       │  │ SessionManager            │  │   │
+│                                       │  │  (singleton)              │  │   │
+│                                       │  │   • sessions map          │  │   │
+│                                       │  │   • tab→session map       │  │   │
+│                                       │  │   • chrome.storage.local  │  │   │
+│                                       │  └───────────────────────────┘  │   │
+│                                       │                                 │   │
+│                                       │  ┌───────────────────────────┐  │   │
+│                                       │  │ Tab Observers             │  │   │
+│                                       │  │  Created / Updated /      │  │   │
+│                                       │  │  Removed                  │  │   │
+│                                       │  └───────────────────────────┘  │   │
+│                                       │                                 │   │
+│                                       │  ┌───────────────────────────┐  │   │
+│                                       │  │ StrategyFactory           │  │   │
+│                                       │  │  10 ATS strategies +      │  │   │
+│                                       │  │  Generic fallback         │  │   │
+│                                       │  └───────────────────────────┘  │   │
+│                                       │                                 │   │
+│                                       │  ┌───────────────────────────┐  │   │
+│                                       │  │ ReceiverAdapter           │  │   │
+│                                       │  │  session → wire payload   │  │   │
+│                                       │  └───────────────────────────┘  │   │
+│                                       │                                 │   │
+│                                       │  ┌───────────────────────────┐  │   │
+│                                       │  │ receiver-api.js           │  │   │
+│                                       │  │  HTTP → Layer 2A          │  │   │
+│                                       │  └───────────────────────────┘  │   │
+│                                       │                                 │   │
+│                                       │  ┌───────────────────────────┐  │   │
+│                                       │  │ client.js                 │  │   │
+│                                       │  │  HTTP → Layer 3 (auth)    │  │   │
+│                                       │  └───────────────────────────┘  │   │
+│                                       └─────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │   CONTENT SCRIPT  (runs in page context, all_frames: true)          │   │
+│  │                                                                     │   │
+│  │  bundle.js                                                          │   │
+│  │   • isJobPage() guard                                               │   │
+│  │   • JobPulse class  →  detect job, attach apply click listener      │   │
+│  │   • SuccessDetector class  →  watch for success phrases/URLs        │   │
+│  │                                                                     │   │
+│  │  detectors/                                                         │   │
+│  │   • LinkedInDetector    (detail + search pages)                     │   │
+│  │   • NaukriDetector                                                  │   │
+│  │   • GenericDetector     (JSON-LD, selectors, location heuristics)   │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Component Layers
+### Flow Diagram (one full application, start to end)
 
-| Layer | Responsibility | Location |
-|-------|----------------|----------|
-| **Detection** | Job detection, apply click, URL tracking | Content script + Background |
-| **Orchestration** | Session lifecycle, state machine | Background (ApplicationTracker) |
-| **Data Management** | Session storage, persistence | Background (SessionManager) |
-| **Intelligence** | ATS detection, success detection | Strategies + Content |
-| **Transport** | Send payload to backend | SubmittedState |
+```
+USER ACTION                       EXTENSION INTERNAL                        NETWORK
+────────────                       ──────────────────                        ───────
+                                   ┌──────────────────┐
+                                   │ Popup opens      │
+                                   └────────┬─────────┘
+                                            │ checkAuth()
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ getCurrentUser() │ ──────────► GET /api/v1/auth/me
+                                   └────────┬─────────┘                      (Layer 3)
+                                            │
+User enters credentials                     │ 401 → show login form
+  └─────────────────────────────►  ┌──────────────────┐
+                                   │ login()          │ ──────────► POST /api/v1/auth/login
+                                   └────────┬─────────┘                      (Layer 3)
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ store JWT        │
+                                   │ in chrome.storage│
+                                   └──────────────────┘
+
+User opens LinkedIn job page       ┌──────────────────┐
+  └─────────────────────────────►  │ Content script   │
+                                   │ isJobPage() ✓    │
+                                   └────────┬─────────┘
+                                            │ detect()
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ JobPulse.detect()│
+                                   │ LinkedInDetector │
+                                   └────────┬─────────┘
+                                            │ chrome.runtime.sendMessage
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ stateManager     │
+                                   │ .setJob(job)     │
+                                   └──────────────────┘
+
+User clicks Apply                  ┌──────────────────┐
+  └─────────────────────────────►  │ APPLY_CLICKED    │
+                                   └────────┬─────────┘
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ ApplicationTracker│
+                                   │ .handleApplyClick │
+                                   └────────┬─────────┘
+                                            │ creates session
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ SessionManager    │
+                                   │ .createSession()  │
+                                   └────────┬─────────┘
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ InitiatedState   │
+                                   │ (5 min timeout)  │
+                                   └────────┬─────────┘
+                                            │ state = 'initiated'
+
+Chrome opens redirect tab          ┌──────────────────┐
+  └─────────────────────────────►  │ TabCreatedObserver│
+                                   └────────┬─────────┘
+                                            │ TAB_CREATED
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ ApplicationTracker│
+                                   │ .handleTabCreated│
+                                   └────────┬─────────┘
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ RedirectingState │
+                                   │ (30 s timeout)   │
+                                   └────────┬─────────┘
+                                            │ state = 'redirecting'
+
+Chrome navigates to ATS page       ┌──────────────────┐
+  └─────────────────────────────►  │ TabUpdatedObserver│
+                                   └────────┬─────────┘
+                                            │ URL_CHANGED
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ ApplicationTracker│
+                                   │ .processSession  │
+                                   │  Update()        │
+                                   │  • push to       │
+                                   │    visitedUrls   │
+                                   │  • extract jobId │
+                                   │  • re-eval       │
+                                   │    strategy      │
+                                   └────────┬─────────┘
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ InProgressState  │
+                                   │ (30 min timeout) │
+                                   └────────┬─────────┘
+                                            │ state = 'in_progress'
+
+User fills and submits form        ┌──────────────────┐
+  └─────────────────────────────►  │ SuccessDetector  │
+                                   │ (content script) │
+                                   │ or               │
+                                   │ TabUpdated URL   │
+                                   │ pattern match    │
+                                   └────────┬─────────┘
+                                            │ SUCCESS_DETECTED
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ SubmittedState   │
+                                   │ .onEnter()       │
+                                   └────────┬─────────┘
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ ReceiverAdapter  │
+                                   │ .applicationSub  │
+                                   │  mitted()        │
+                                   └────────┬─────────┘
+                                            │
+                                            ▼
+                                   ┌──────────────────┐
+                                   │ receiver-api.js  │ ──────────► POST /receive/v1/events
+                                   │ .submitEvent()   │                      (Layer 2A)
+                                   └────────┬─────────┘
+                                            │
+                        ┌───────────────────┼────────────────────┐
+                        │                   │                    │
+                        ▼                   ▼                    ▼
+                  ┌──────────┐        ┌──────────┐        ┌──────────────┐
+                  │ 200 OK   │        │ network  │        │ 4xx / 5xx    │
+                  │ success  │        │ error    │        │ server error │
+                  └────┬─────┘        └────┬─────┘        └──────┬───────┘
+                       │                   │                     │
+                       ▼                   ▼                     ▼
+                  ┌──────────────────────────────────────────────────┐
+                  │ if failure: store in chrome.storage.local        │
+                  │ .failedSubmissions  (retry queue)                │
+                  └──────────────────────────────────────────────────┘
+```
+
+### State Machine (compact)
+
+```
+                    ┌─────────────┐
+                    │  initiated  │  ← Session created on Apply click
+                    │  5 min TO   │
+                    └──────┬──────┘
+                           │ new tab opens
+                           ▼
+                    ┌─────────────┐
+                    │ redirecting │  ← LinkedIn safety redirect → ATS
+                    │  30 s TO    │
+                    └──────┬──────┘
+                           │ form detected
+                           ▼
+                    ┌─────────────┐
+                    │ in_progress │  ← User filling the ATS form
+                    │  30 min TO  │
+                    └──────┬──────┘
+                           │
+              ┌────────────┴────────────┐
+              │ success detected        │ tab closed / timeout / inactivity
+              ▼                         ▼
+       ┌─────────────┐           ┌─────────────┐
+       │  submitted  │           │  abandoned  │
+       │  (terminal) │           │  (terminal) │
+       └──────┬──────┘           └─────────────┘
+              │
+              ▼
+       POST /receive/v1/events
+       (Layer 2A)
+```
+
+### Layer Map
+
+```
+                          ┌─────────────────────────┐
+                          │      LAYER 1            │
+                          │      EXTENSION          │
+                          │                         │
+                          │  writes events ─────────┼───► Layer 2A :8001
+                          │  reads auth ────────────┼───► Layer 3 :8000
+                          └─────────────────────────┘
+                                     │
+                    ┌────────────────┴────────────────┐
+                    │                                 │
+                    ▼                                 ▼
+        ┌───────────────────────┐         ┌───────────────────────┐
+        │  LAYER 2A             │         │  LAYER 3              │
+        │  Receiver :8001       │         │  Job Tracker :8000    │
+        │                       │         │                       │
+        │  • POST /receive/     │         │  • POST /auth/login   │
+        │    v1/events          │         │  • GET  /auth/me      │
+        │  • GET  /health       │         │  • /applications/*    │
+        │  • GET  /info         │         │  • /companies/*       │
+        │                       │         │  • /internal/*        │
+        │  writes raw_events    │         │  (frontend reads)     │
+        └───────────┬───────────┘         └───────────────────────┘
+                    │
+                    ▼
+        ┌───────────────────────┐
+        │  LAYER 2B             │
+        │  Promoter (worker)    │
+        │                       │
+        │  polls raw_events     │
+        │  transforms           │
+        │  POSTs to Layer 3     │
+        │   /internal/          │
+        │   applications        │
+        └───────────────────────┘
+```
 
 ---
 
-## 5. Project Structure
+## 4. Start-to-End Flow (Text)
+
+### Phase A — User logs in
 
 ```
-tracker_extension/
-├── manifest.json                     # Extension config
-├── package.json
-├── build.js                          # esbuild bundler
-├── build.sh
-│
-├── config/                           # Environment configs
-│   ├── development.js
-│   ├── production.js
-│   └── staging.js
-│
-├── icons/                            # Extension icons
-│
-└── src/
-    ├── background/                   # Service worker (MV3)
-    │   ├── service-worker.js         # Main entry point
-    │   │
-    │   ├── core/
-    │   │   ├── interfaces.js
-    │   │   ├── constants.js
-    │   │   └── event-bus.js
-    │   │
-    │   ├── managers/
-    │   │   ├── ApplicationTracker.js  # Orchestrator (facade)
-    │   │   └── SessionManager.js      # Session lifecycle
-    │   │
-    │   └── patterns/
-    │       ├── base/
-    │       │   ├── SessionState.js
-    │       │   └── TabObserver.js
-    │       │
-    │       ├── factories/
-    │       │   ├── SessionFactory.js
-    │       │   └── StrategyFactory.js
-    │       │
-    │       ├── observers/
-    │       │   ├── TabCreatedObserver.js
-    │       │   ├── TabUpdatedObserver.js
-    │       │   └── TabRemovedObserver.js
-    │       │
-    │       ├── states/
-    │       │   ├── state-registry.js
-    │       │   ├── InitiatedState.js
-    │       │   ├── RedirectingState.js
-    │       │   ├── InProgressState.js
-    │       │   ├── SubmittedState.js
-    │       │   └── AbandonedState.js
-    │       │
-    │       └── strategies/
-    │           ├── GreenhouseStrategy.js
-    │           ├── LeverStrategy.js
-    │           ├── WorkdayStrategy.js
-    │           ├── AshbyStrategy.js
-    │           ├── DeelStrategy.js
-    │           ├── SmartRecruitersStrategy.js
-    │           ├── iCIMSStrategy.js
-    │           ├── BambooHRStrategy.js
-    │           ├── TaleoStrategy.js
-    │           └── GenericStrategy.js
-    │
-    ├── content/                      # Content script
-    │   ├── bundle.js                 # Entry + JobPulse + SuccessDetector
-    │   └── detectors/
-    │       ├── base-detector.js
-    │       ├── detector-factory.js
-    │       ├── linkedin-detector.js
-    │       ├── naukri-detector.js
-    │       └── generic-detector.js
-    │
-    ├── popup/                        # Extension popup
-    │   ├── popup.html
-    │   ├── popup.css
-    │   └── popup.js
-    │
-    ├── api/
-    │   └── client.js                 # Backend HTTP client
-    │
-    ├── state/
-    │   └── state-manager.js
-    │
-    ├── config/
-    │   └── config.js
-    │
-    └── utils/
-        └── storage.js
+Popup opens
+  └─► popup.js → checkAuth() via service worker
+        └─► service-worker.js → API_CLIENT.getCurrentUser()
+              └─► GET /api/v1/auth/me (Layer 3)
+                    ├─ 200 → popup shows session status
+                    └─ 401 → popup shows login form
+
+User submits login form
+  └─► popup.js → port.postMessage({ type: 'LOGIN' })
+        └─► service-worker.js → API_CLIENT.login(email, password)
+              └─► POST /api/v1/auth/login (Layer 3)
+                    └─► returns { access_token }
+                          └─► stored in chrome.storage.local.access_token
+```
+
+### Phase B — User opens a job page
+
+```
+Content script loads (all_urls, all_frames)
+  └─► bundle.js → isJobPage() guard
+        ├─ true  → JobPulse.detect()
+        │           └─► detector-factory → LinkedIn/Naukri/Generic detector
+        │                 └─► extracts job (title, company, jobId, applyType)
+        │                       └─► chrome.runtime.sendMessage({ type: 'JOB_DETECTED', payload })
+        │                             └─► service-worker.handleMessage
+        │                                   └─► stateManager.setJob(job)
+        │                                         └─► broadcastStateUpdate → popup re-renders
+        └─ false → content script exits silently
+
+Content script also attaches click listener to Apply button
+  └─► on click → sendMessage({ type: 'APPLY_BUTTON_CLICKED', payload })
+```
+
+### Phase C — User clicks Apply
+
+```
+service-worker.handleApplyClick(payload, sender)
+  ├─► dedup check (jobId + tabId)
+  ├─► resolve redirect URL (unwrap linkedin.com/safety/go?url=...)
+  └─► applicationTracker.handleApplyClick({ jobData, applyData })
+        ├─► sessionManager.createSession()
+        │     └─► SessionFactory.createSession → session object
+        │           └─► InitiatedState.onEnter()
+        ├─► strategyFactory.getStrategy(redirectUrl)
+        │     └─► selects ATS strategy (Greenhouse / Lever / Workday / ...)
+        ├─► pushes LinkedIn source URL to session.visitedUrls
+        └─► pushes redirect URL to session.visitedUrls
+
+stateManager.setJob({ ...job, lastApplyClick: {...} })
+broadcastStateUpdate → popup shows "redirecting"
+```
+
+### Phase D — Browser navigates to the ATS
+
+```
+Chrome opens a new tab (LinkedIn safety redirect → ATS)
+  └─► TabCreatedObserver.handleTabCreated
+        └─► dispatches TAB_CREATED
+              └─► ApplicationTracker.handleTabCreated
+                    ├─► maps new tab to session (via openerTabId)
+                    ├─► session.status → 'redirecting'
+                    └─► RedirectingState.onEnter()
+
+Chrome navigates the tab (URL changes, page loads)
+  └─► TabUpdatedObserver.handleTabUpdated
+        └─► dispatches URL_CHANGED + TAB_LOADED
+              └─► ApplicationTracker.processSessionUpdate
+                    ├─► pushes new URL to session.visitedUrls
+                    ├─► extracts jobId from URL
+                    ├─► re-evaluates strategy if needed (generic → specific ATS)
+                    ├─► if strategy.isSuccessPage(url) → jump to Phase F
+                    └─► otherwise → session.status → 'in_progress'
+                          └─► InProgressState.onEnter()
+                                └─► starts inactivity timer
+```
+
+### Phase E — User fills and submits the form
+
+```
+Every URL change while in_progress
+  └─► ApplicationTracker.processSessionUpdate
+        ├─► pushes URL to session.visitedUrls
+        ├─► strategy.detectStep(url, title)
+        │     └─► records step (form / review / submit / success)
+        └─► if success step detected → Phase F
+
+Content script SuccessDetector (runs in every ATS iframe)
+  ├─► watches DOM mutations and periodic checks
+  ├─► checks: iframe URL pattern, keyword combinations, exact phrases
+  └─► on match → sendMessage({ type: 'SUCCESS_DETECTED', payload })
+        └─► service-worker.handleSuccessDetected
+              └─► ApplicationTracker.handleSuccessDetected
+                    └─► session.status → 'submitted'
+                          └─► SubmittedState.onEnter() → Phase F
+```
+
+### Phase F — Submission
+
+```
+SubmittedState.onEnter()
+  ├─► session.status = 'submitted'
+  ├─► extractThankYouMessage()
+  ├─► buildAndSendPayload()
+  │     ├─► receiverAdapter.applicationSubmitted(session)
+  │     │     └─► builds wire payload { event_type, source, session_id, payload: {...} }
+  │     └─► receiver-api.submitEvent(payload)
+  │           ├─► reads JWT from chrome.storage.local
+  │           └─► POST /receive/v1/events (Layer 2A)
+  │                 ├─► 200 → success, session marked complete
+  │                 └─► error → payload stored in chrome.storage.local.failedSubmissions
+  ├─► showNotification()  "✅ Applied to X at Y"
+  └─► cleanup()  → clear timers, remove session callbacks
+
+service-worker session event listener
+  └─► on 'application_submitted' → broadcastStateUpdate
+        └─► popup shows "submitted"
+```
+
+### Phase G — Abandonment (alternate exit)
+
+```
+Any of:
+  ├─► User closes the redirect tab before submitting
+  │     └─► TabRemovedObserver → TAB_REMOVED
+  │           └─► ApplicationTracker.handleTabRemoved
+  │                 └─► AbandonedState.onEnter()
+  ├─► User inactive for 30 min
+  │     └─► InProgressState inactivity timer fires
+  │           └─► AbandonedState.onEnter()
+  └─► Session timeout (5 min in initiated, 30 min in in_progress)
+        └─► AbandonedState.onEnter()
+
+AbandonedState.onEnter()
+  ├─► session.status = 'abandoned'
+  ├─► records reason (tab_closed / inactivity / timeout)
+  ├─► stores abandonment data in chrome.storage.local.abandonedSessions
+  └─► cleanup()
+
+No payload is sent to Layer 2 on abandonment.
 ```
 
 ---
 
-## 6. Design Patterns Used
+## 5. Identity & JWT Model
 
-| Pattern | Where | Purpose |
-|---------|-------|---------|
-| **Factory** | StrategyFactory, SessionFactory | Create strategies/sessions dynamically |
-| **Strategy** | ATS strategies | Different logic per ATS |
-| **State** | SessionState + 5 states | Manage application lifecycle |
-| **Observer** | TabObservers | React to Chrome tab events |
-| **Facade** | ApplicationTracker | Simplify complex subsystem |
-| **Singleton** | SessionManager, ApplicationTracker | Single instance |
-| **Adapter** | API client | Normalize backend communication |
-| **Registry** | state-registry.js | Pre-load states (Chrome MV3 constraint) |
+The extension authenticates once against **Layer 3** and then carries that identity on every event sent to Layer 2A. Layer 3 is the source of truth for user identity. Layer 2A trusts the JWT Layer 3 signed.
 
----
+### The flow
 
-## 7. The Session Lifecycle
+1. **Login** — popup sends email + password to Layer 3 via `API_CLIENT.login()`.
+2. **Layer 3 issues a JWT** — signed with `SECRET_KEY` / `HS256`, `sub = user.id`, `exp = now + 10080 min (7 days)`.
+3. **Extension stores it** — `chrome.storage.local.access_token`.
+4. **Every event carries it** — `receiver-api.js` reads the token and sends `Authorization: Bearer <jwt>` on every `POST /receive/v1/events`.
+5. **Layer 2A validates it** — decodes with the **same** `SECRET_KEY` and `ALGORITHM`. On success, extracts `user_id` from `sub` and stores it on the raw event.
+6. **No re-verification with Layer 3** — Layer 2A does not call Layer 3 during event ingestion. It trusts the signature.
 
-### Session States
+### What this means
 
-```
-initiated → redirecting → in_progress → submitted
-                                    ↘ abandoned
-```
+- **Layer 3's `SECRET_KEY` and `ALGORITHM` must be set identically on Layer 2A's `.env`.** Mismatch = every event 401s.
+- **The extension never reads application data from Layer 3.** Only `auth/login` and `auth/me`.
+- **The extension never writes applications to Layer 3.** Events go to Layer 2A; Layer 2B promotes them to Layer 3.
+- **Token lifetime is 7 days.** After that, the extension must re-login (popup shows the login form on 401).
+- **If a user is deactivated in Layer 3**, their existing JWT still validates until it expires. Layer 2A has no way to know sooner — that's acceptable for now.
 
-| State | When | What Happens |
-|-------|------|--------------|
-| **initiated** | User clicks Apply | Session created with job data |
-| **redirecting** | New tab opens to external site | Tracks redirect URLs |
-| **in_progress** | Form page detected | User filling application |
-| **submitted** | Success page detected | Payload built and sent |
-| **abandoned** | Tab closed or timeout | Session marked abandoned |
+### Why the extension has an `API_CLIENT` at all
 
-### State Transitions
-
-| From | To | Trigger |
-|------|-----|---------|
-| initiated | redirecting | New tab opens |
-| redirecting | in_progress | Form page detected |
-| redirecting | submitted | Success page detected directly |
-| in_progress | submitted | Success page detected |
-| any | abandoned | Tab closed or 60s inactivity |
+Because the extension needs a JWT, and only Layer 3 issues them. The `client.js` file exists to call Layer 3's auth endpoints and nothing else. Any other method in it — `trackJob`, `checkJobStatus`, etc. — is a design violation and must be deleted.
 
 ---
 
-## 8. What the Extension Tracks
+## 6. The Wire Payload & ReceiverAdapter
 
-### Per Session
+### The adapter's role
 
-| Field | Description |
-|-------|-------------|
-| `sessionId` | Unique ID |
-| `jobId` | LinkedIn job ID |
-| `jobTitle` | Job title |
-| `company` | Company name |
-| `location` | Location |
-| `jobUrl` | Original LinkedIn URL |
-| `redirectUrl` | LinkedIn safety redirect URL |
-| `applyUrl` | Apply button href |
-| `successUrl` | Confirmation page URL |
-| `jobIds` | `{ linkedin, greenhouse, external }` |
-| `externalJobId` | Job ID from external site |
-| `applicationReference` | Application confirmation number |
-| `ats` / `atsName` | Detected ATS |
-| `visitedUrls` | All URLs with order, label, jobId, timestamp |
-| `steps` | Detected form steps |
-| `startedAt` / `submittedAt` | Timestamps |
-| `status` | Current state |
+`src/background/adapters/receiver-adapter.js` is a **pure transformation** — session object → wire payload. No I/O, no HTTP, no side effects.
 
-### URL Chain
+It is the **only place in the extension that knows the wire shape**. If Layer 2A's contract changes, only this file changes.
 
-Each URL in the chain has:
-```javascript
+### The envelope
+
+Everything the extension sends is wrapped in a fixed envelope:
+
+```js
 {
-  order: 1,
-  url: 'https://...',
-  label: 'LinkedIn Job Search',
-  timestamp: 1789551570368,
-  tabId: 204097401,
-  title: 'Senior Software Engineer',
-  jobId: '4466531322'
+  event_type: 'application_submitted',   // what happened
+  source: 'chrome_extension',            // where from
+  session_id: 'session_1789551570367_...',   // which session
+  application_attempt_id: null,          // future: cross-session attempt ID
+  job_key: null,                         // future: canonical job identity
+  payload: { ... }                       // event-specific body
 }
 ```
 
----
+`application_attempt_id` and `job_key` are **placeholders**, always `null` today. They exist so the receiver's schema can evolve without breaking the extension.
 
-## 9. Payload Sent to Backend
+### The payload (application_submitted)
 
-```javascript
+Sent to `POST /receive/v1/events`. Built by `ReceiverAdapter.applicationSubmitted(session)`.
+
+```json
 {
-  // Job Info
-  jobId: '4466531322',
-  jobTitle: 'Senior Software Engineer',
-  company: 'Oportun',
-  location: null,
-  jobUrl: 'https://...',
-
-  // Job ID Tracking
-  linkedInJobId: '4466531322',
-  externalJobId: '4699315005',
-  jobIds: {
-    linkedin: '4466531322',
-    greenhouse: '4699315005'
-  },
-  applicationReference: null,
-  confirmationNumber: null,
-
-  // Application Info
-  status: 'applied',
-  appliedAt: 1789551656942,
-  source: 'greenhouse',
-  applyMethod: 'external_redirect',
-  stepsCompleted: 0,
-  thankYouPhrase: 'thank you for applying',
-
-  // URL Chain (has everything)
-  urlChain: [
-    { order: 1, url: '...', label: 'LinkedIn Job Search', jobId: '...', timestamp, tabId, title },
-    { order: 2, url: '...', label: 'Greenhouse', jobId: null, timestamp, tabId, title },
-    { order: 3, url: '...', label: 'Greenhouse', jobId: '4699315005', timestamp, tabId, title },
-    { order: 4, url: '...', label: 'Greenhouse Confirmation', jobId: '4699315005', timestamp, tabId, title }
-  ],
-
-  // Timing
-  startedAt: 1789551570367,
-  redirectedAt: 1789551570393,
-  submittedAt: 1789551656942,
-  totalTimeMs: 86575,
-  totalTimeSeconds: 87,
-
-  // ATS
-  ats: 'greenhouse',
-  atsName: 'Greenhouse',
-
-  // System
-  sessionId: 'session_1789551570367_tpdcrkqw',
-  platform: 'linkedin',
-  detectedAt: '2026-09-16T09:40:56.943Z',
-  version: '0.1.0',
-
-  // Steps
-  steps: [],
-
-  // User
-  userId: null
-}
-```
-
----
-
-## 10. ATS Platforms Supported (10)
-
-| Priority | ATS | Domain/Pattern | Detection Method |
-|----------|-----|----------------|------------------|
-| 10 | Greenhouse | `greenhouse.io`, `gh_jid=`, `gh_src=` | Domain + query params |
-| 9 | Lever | `lever.co`, `jobs.lever.co` | Domain |
-| 8 | Workday | `myworkdayjobs.com`, `workday.com` | Domain |
-| 7 | Ashby | `ashbyhq.com`, `ashby.com` | Domain |
-| 7 | Deel | `deel.com`, `jobs.deel.com` | Domain |
-| 6 | SmartRecruiters | `smartrecruiters.com` | Domain |
-| 5 | iCIMS | `icims.com` | Domain |
-| 4 | BambooHR | `bamboohr.com` | Domain |
-| 3 | Taleo | `taleo.net` | Domain |
-| 0 | Generic | Any URL | Fallback |
-
-### Key Insight: Query Param Detection
-
-Greenhouse supports **custom company domains** via `gh_jid`:
-
-```
-https://www.payoneer.com/careers/position/8019863?gh_jid=8019863&gh_src=11e459421
-```
-
-**This is detected as Greenhouse even though the domain is `payoneer.com`.**
-
----
-
-## 11. Success Detection (Multi-Layer)
-
-Success detection is the hardest problem because ATS platforms differ.
-
-### 4 Detection Methods
-
-| # | Method | How It Works | Example |
-|---|--------|--------------|---------|
-| 1 | **URL pattern** | Success in URL | `/confirmation`, `/thank-you`, `/success` |
-| 2 | **Iframe URL** | Iframe URL has success pattern | `job-boards.greenhouse.io/embed/job_app/confirmation` |
-| 3 | **Keyword detection** | Page text has keywords | "thank you" + "applying", "received" + "application" |
-| 4 | **Exact phrase** | Page text has exact phrase | "we have received your application" |
-
-### Keyword Detection Rules
-
-```javascript
-// Rule 1: Thank + Action
-'thank you' + 'applying'     → success
-'thanks for' + 'application' → success
-
-// Rule 2: Received + Application
-'received' + 'application'   → success
-
-// Rule 3: Submitted + Success
-'submitted' + 'successfully' → success
-
-// Rule 4: Strong phrases
-'application submitted'       → success
-'we have received your application' → success
-```
-
-### Iframe Handling
-
-The manifest uses `all_frames: true` so content script runs inside iframes. This catches:
-- Greenhouse embedded forms inside company careers pages
-- Any ATS that uses iframes
-
----
-
-## 12. What's Working (Current State)
-
-| Feature | Status |
-|---------|--------|
-| Job detection (LinkedIn, Naukri, Generic) | ✅ |
-| Apply click tracking | ✅ |
-| Session creation | ✅ |
-| Tab tracking (Chrome tabs API) | ✅ |
-| URL chain tracking | ✅ |
-| Job ID extraction (LinkedIn, Greenhouse, Lever, Workday, etc.) | ✅ |
-| ATS detection (10 platforms) | ✅ |
-| Query param detection (`gh_jid`, `gh_src`) | ✅ |
-| State machine (5 states) | ✅ |
-| Success detection (URL pattern) | ✅ |
-| Success detection (iframe URL) | ✅ |
-| Success detection (keyword-based) | ✅ |
-| Payload building | ✅ |
-| Failed payload storage (for retry) | ✅ |
-| Notifications | ✅ |
-| Session persistence to `chrome.storage.local` | ✅ |
-| Auto-session creation from URL | ✅ |
-| Dynamic import fix (Chrome MV3) | ✅ |
-
----
-
-## 13. Known Issues & Gaps
-
-### Critical
-
-| Issue | Impact | Fix |
-|-------|--------|-----|
-| **Backend HTTP 405** | Payloads not saved | Backend endpoint must accept POST |
-| **`<all_urls>` not in manifest** | Content script doesn't run on custom domains | Add `<all_urls>` + guard |
-| **Inactivity timeout too short** | Sessions abandon at 60s | Increase to 5-10 min |
-
-### Medium
-
-| Issue | Impact | Fix |
-|-------|--------|-----|
-| **Login page not handled** | ATS login breaks tracking | Add `login` step + pause state |
-| **JD vs Form differentiation** | JD page detected as form | Add `jd` step pattern |
-| **Session leakage** | New jobs added to old sessions | Add `isNewJobPage()` check |
-
-### Low
-
-| Issue | Impact | Fix |
-|-------|--------|-----|
-| **Missing icons** | `Unable to download images` warning | Add icon files |
-| **Location not extracted** | `location: null` in payload | Improve location selectors |
-
----
-
-## 14. What's Not Built Yet
-
-### Backend
-
-| Component | Status |
-|-----------|--------|
-| FastAPI endpoint for `/applications/track` | ❌ |
-| PostgreSQL database (DB1: raw, DB2: analytics) | ❌ |
-| Event processing pipeline | ❌ |
-| ATS detection on backend | ❌ |
-| Deduplication logic | ❌ |
-| User authentication | ❌ |
-
-### Dashboard
-
-| Component | Status |
-|-----------|--------|
-| Login/signup | ❌ |
-| Application list | ❌ |
-| Daily/weekly stats | ❌ |
-| URL chain visualization | ❌ |
-| Analytics | ❌ |
-
-### Extension Features
-
-| Feature | Status |
-|---------|--------|
-| `<all_urls>` support | ❌ |
-| Login page handling | ❌ |
-| JD vs Form differentiation | ❌ |
-| Session isolation | ❌ |
-| Auto-fill | ❌ |
-| Resume matching | ❌ |
-| Resume tailoring | ❌ |
-
----
-
-## 15. The Product Vision (Post-MVP)
-
-### Short Term (v0.2)
-
-- Fix HTTP 405
-- Add `<all_urls>` + guard
-- Increase inactivity timeout
-- Add login page handling
-- Add session isolation
-
-### Medium Term (v0.3-v0.5)
-
-- Dashboard (applications list + stats)
-- User authentication
-- Auto-fill (fill forms with saved profile)
-- Resume upload and parsing
-
-### Long Term (v0.6+)
-
-- Resume matching (score job vs resume)
-- Resume tailoring (rephrase to match JD)
-- Mass apply to relevant jobs (with guardrails)
-- Behavior analytics (coaching suggestions)
-
-### Ultimate Goal
-
-**"The anti-doom-loop job search tool"** — helping job seekers apply with **intent and precision**, not spam.
-
----
-
-## 16. Key Files Explained
-
-### `manifest.json`
-
-- Chrome MV3
-- 10 ATS domains + `<all_urls>` (pending)
-- `all_frames: true` for iframe support
-- Permissions: `storage`, `tabs`, `scripting`, `notifications`
-
-### `service-worker.js`
-
-- Main entry point
-- Sets up tab listeners
-- Handles messages from content + popup
-- Routes to `ApplicationTracker`
-
-### `ApplicationTracker.js`
-
-- **Core orchestrator**
-- Handles tab created/updated/removed events
-- Manages session lifecycle
-- Coordinates state transitions
-- Has utility methods: `extractJobIdFromUrl`, `getUrlLabel`, `detectJobIdSource`, `extractApplicationIdFromUrl`
-- Has `handleSuccessDetected()` for content-based success
-
-### `SessionManager.js`
-
-- Session CRUD
-- Tab-to-session mapping
-- Persistence to storage
-- Session restoration on startup
-
-### `StrategyFactory.js`
-
-- Registers 10 strategies
-- Selects strategy based on URL
-- Handles null URLs (fallback to generic)
-
-### `state-registry.js`
-
-- Pre-loads all 5 states with **static imports**
-- **Critical for Chrome MV3** (dynamic `import()` disallowed)
-
-### `SubmittedState.js`
-
-- Terminal state
-- Builds payload with `urlChain`
-- Sends to backend (HTTP POST)
-- Stores failed payloads for retry
-- Shows notification
-- Cleanup
-
-### `content/bundle.js`
-
-- Content script entry
-- `JobPulse` class for job detection
-- `SuccessDetector` class for success detection
-- Runs in all frames (via `all_frames: true`)
-
----
-
-## 17. The Session Data Structure
-
-```javascript
-{
-  // Identity
-  sessionId: 'session_1789625269383_0c1iopjg',
-  
-  // Job
-  jobId: '4468212982',
-  jobTitle: 'Senior Software Engineer, ITC',
-  company: 'Nike',
-  location: null,
-  jobUrl: 'https://...',
-  
-  // Apply
-  applyUrl: 'https://...',
-  redirectUrl: 'https://...',
-  sourceTabId: 204097779,
-  redirectTabId: 204097848,
-  trackedTabs: [204097779, 204097848, 204097851],
-  
-  // URL Tracking
-  visitedUrls: [
-    { order: 1, url: '...', label: '...', jobId: '...', timestamp, tabId, title }
-  ],
-  
-  // Job IDs
-  jobIds: { linkedin: '4468212982', external: '...' },
-  externalJobId: '...',
-  applicationReference: null,
-  
-  // ATS
-  ats: 'workday',
-  atsName: 'Workday',
-  atsStrategy: <instance>,
-  
-  // State
-  status: 'submitted',  // initiated | redirecting | in_progress | submitted | abandoned
-  currentState: <State instance>,
-  stateHistory: [...],
-  
-  // Steps
-  steps: [...],
-  stepCount: 0,
-  
-  // Timing
-  startedAt: 1789625269383,
-  redirectedAt: ...,
-  submittedAt: ...,
-  lastActivityAt: ...,
-  abandonedAt: null,
-  
-  // Success
-  successUrl: '...',
-  thankYouPhrase: '...',
-  confirmationMessage: null,
-  
-  // Timers
-  timers: { inactivityTimeout: null, sessionTimeout: null },
-  
-  // Version
-  version: '1.0.0',
-  schema: 'session_v1'
-}
-```
-
----
-
-## 18. How to Test
-
-### Manual Testing Flow
-
-| Step | Action |
-|------|--------|
-| 1 | Load extension in Chrome (`chrome://extensions/`) |
-| 2 | Navigate to LinkedIn job |
-| 3 | Click Apply |
-| 4 | Complete application |
-| 5 | Check service worker console for `[SubmittedState]` logs |
-| 6 | Verify payload in `chrome.storage.local.failedSubmissions` |
-
-### Console Commands
-
-**Check failed payloads:**
-```javascript
-chrome.storage.local.get('failedSubmissions', (result) => {
-  const failed = result.failedSubmissions || [];
-  console.log('Total failed:', failed.length);
-  failed.forEach((f, i) => {
-    console.log(`#${i+1}: ${f.payload.jobTitle} at ${f.payload.company} (${f.payload.ats})`);
-  });
-});
-```
-
-**Check sessions:**
-```javascript
-chrome.storage.local.get('sessionManagerData', (result) => {
-  const data = result.sessionManagerData;
-  if (data && data.sessions) {
-    console.log('Total sessions:', data.sessions.length);
+  "event_type": "application_submitted",
+  "source": "chrome_extension",
+  "session_id": "session_1789551570367_tpdcrkqw",
+  "application_attempt_id": null,
+  "job_key": null,
+  "payload": {
+    "jobId": "4466531322",
+    "jobTitle": "Senior Software Engineer",
+    "company": "Oportun",
+    "location": null,
+    "jobUrl": "https://www.linkedin.com/jobs/view/4466531322/",
+
+    "linkedInJobId": "4466531322",
+    "externalJobId": "4699315005",
+    "jobIds": {
+      "linkedin": "4466531322",
+      "greenhouse": "4699315005"
+    },
+    "applicationReference": null,
+    "confirmationNumber": null,
+
+    "status": "applied",
+    "appliedAt": 1789551656942,
+    "source": "greenhouse",
+    "applyType": "external",
+    "applyMethod": "external_redirect",
+    "stepsCompleted": 4,
+    "thankYouPhrase": "thank you for applying",
+    "confirmationMessage": null,
+
+    "urlChain": [
+      {
+        "order": 1,
+        "url": "https://www.linkedin.com/jobs/view/4466531322/",
+        "label": "LinkedIn Job Detail",
+        "timestamp": 1789551570367,
+        "tabId": 204097401,
+        "title": "Senior Software Engineer - Oportun | LinkedIn",
+        "jobId": "4466531322"
+      },
+      {
+        "order": 2,
+        "url": "https://www.linkedin.com/safety/go?url=https%3A%2F%2Fboards.greenhouse.io%2Foportun%2Fjobs%2F4699315005",
+        "label": "LinkedIn Safety Redirect",
+        "timestamp": 1789551570393,
+        "tabId": 204097848,
+        "title": null,
+        "jobId": null
+      },
+      {
+        "order": 3,
+        "url": "https://boards.greenhouse.io/oportun/jobs/4699315005",
+        "label": "Greenhouse",
+        "timestamp": 1789551570450,
+        "tabId": 204097848,
+        "title": "Senior Software Engineer at Oportun",
+        "jobId": "4699315005"
+      },
+      {
+        "order": 4,
+        "url": "https://boards.greenhouse.io/oportun/jobs/4699315005#app",
+        "label": "Greenhouse Application",
+        "timestamp": 1789551573120,
+        "tabId": 204097848,
+        "title": "Apply - Oportun",
+        "jobId": "4699315005"
+      },
+      {
+        "order": 5,
+        "url": "https://boards.greenhouse.io/oportun/jobs/4699315005/confirmation",
+        "label": "Greenhouse Confirmation",
+        "timestamp": 1789551656942,
+        "tabId": 204097848,
+        "title": "Thank you for applying",
+        "jobId": "4699315005"
+      }
+    ],
+
+    "startedAt": 1789551570367,
+    "redirectedAt": 1789551570393,
+    "submittedAt": 1789551656942,
+    "totalTimeMs": 86575,
+    "totalTimeSeconds": 87,
+
+    "ats": "greenhouse",
+    "atsName": "Greenhouse",
+
+    "sessionId": "session_1789551570367_tpdcrkqw",
+    "platform": "linkedin",
+    "detectedAt": "2026-09-16T09:40:56.943Z",
+    "version": "0.1.0",
+
+    "steps": [
+      { "step": "form",    "label": "Application Form",         "timestamp": 1789551573120, "matchedPattern": "/apply" },
+      { "step": "review",  "label": "Review Application",       "timestamp": 1789551580100, "matchedPattern": "/review" },
+      { "step": "submit",  "label": "Submitting Application",   "timestamp": 1789551655000, "matchedPattern": "/submit" },
+      { "step": "success", "label": "Application Submitted",    "timestamp": 1789551656942, "matchedPattern": "success_page" }
+    ],
+
+    "userId": null
   }
-});
+}
 ```
 
-**Full payload:**
-```javascript
-chrome.storage.local.get('failedSubmissions', (result) => {
-  const failed = result.failedSubmissions || [];
-  const last = failed[failed.length - 1];
-  console.log(JSON.stringify(last.payload, null, 2));
-});
-```
+**Invariant:** for `applyType: "external"`, `urlChain` must have **at least 3 entries** — LinkedIn source, LinkedIn safety redirect, ATS page. A single-entry chain paired with `applyType: "external"` is impossible. If a real session produces one, that's a bug (likely in `handleTabCreated` — see §16).
 
----
-
-## 19. Backend Contract (What Backend Should Accept)
-
-### Endpoint
-
-```
-POST /api/v1/applications/track
-```
-
-### Request Body
-
-The payload as shown in Section 9.
-
-### Response (Expected)
+### Response expected
 
 ```json
 {
   "success": true,
-  "id": "app_abc123",
-  "duplicate": false
+  "event_id": 12345,
+  "received_at": "2026-09-16T09:40:57.123Z"
 }
 ```
 
-### Status Codes
+---
 
-| Code | Meaning |
-|------|---------|
-| 200/201 | Success |
-| 400 | Bad request |
-| 401 | Unauthorized |
-| 405 | Method not allowed (current error) |
-| 500 | Server error |
+## 7. Project Structure (Annotated)
+
+```
+tracker_extension/
+├── manifest.json                        # Chrome MV3 config: permissions, content scripts, service worker, host_permissions
+├── package.json                         # npm scripts + esbuild dependency
+├── build.js                             # esbuild bundler; env alias plugin; prod sanity check
+├── create_icons.py                      # One-off icon generator (PIL)
+│
+├── src/
+│   │
+│   ├── api/
+│   │   └── client.js                    # Layer 3 HTTP client — AUTH ONLY (login / me / logout)
+│   │
+│   ├── background/                       # MV3 service worker code
+│   │   ├── service-worker.js            # Entry point: listeners, message routing, tab handling, auth
+│   │   │
+│   │   ├── adapters/
+│   │   │   └── receiver-adapter.js      # Pure transform: session object → wire payload for Layer 2A
+│   │   │
+│   │   ├── api/
+│   │   │   └── receiver-api.js          # Layer 2A HTTP client — events only (submitEvent, pingReceiver)
+│   │   │
+│   │   ├── managers/
+│   │   │   ├── ApplicationTracker.js    # Orchestrator: tab events → session lifecycle; facade over everything
+│   │   │   └── SessionManager.js        # Session storage, tab→session map, persistence to chrome.storage
+│   │   │
+│   │   └── patterns/
+│   │       ├── base/
+│   │       │   ├── SessionState.js              # Abstract state base class
+│   │       │   ├── TabObserver.js               # Abstract observer base class
+│   │       │   └── SubmissionDetectionStrategy.js  # Abstract ATS strategy base class
+│   │       │
+│   │       ├── factories/
+│   │       │   ├── SessionFactory.js            # Creates/restores session objects; validation; URL chain helpers
+│   │       │   └── StrategyFactory.js           # Picks the right ATS strategy for a URL by priority
+│   │       │
+│   │       ├── observers/
+│   │       │   ├── TabCreatedObserver.js        # Wraps chrome.tabs.onCreated; dispatches TAB_CREATED
+│   │       │   ├── TabUpdatedObserver.js        # Wraps chrome.tabs.onUpdated; dispatches URL_CHANGED / TAB_LOADED
+│   │       │   └── TabRemovedObserver.js        # Wraps chrome.tabs.onRemoved; dispatches TAB_REMOVED
+│   │       │
+│   │       ├── states/
+│   │       │   ├── state-registry.js            # Static imports of all states (MV3-safe); exposes STATES map
+│   │       │   ├── InitiatedState.js            # Just created; waiting for redirect; 5 min timeout
+│   │       │   ├── RedirectingState.js          # New tab opened; waiting for page load; 30 s timeout
+│   │       │   ├── InProgressState.js           # User filling form; step detection; inactivity tracking
+│   │       │   ├── SubmittedState.js            # Terminal: builds payload, sends to Layer 2A, notification
+│   │       │   └── AbandonedState.js            # Terminal: records reason, cleans up, no payload
+│   │       │
+│   │       └── strategies/
+│   │           ├── GenericStrategy.js           # Fallback: catches all URLs, common success patterns
+│   │           ├── GreenhouseStrategy.js        # Greenhouse detection + gh_jid/gh_src query params
+│   │           ├── LeverStrategy.js             # Lever detection
+│   │           ├── WorkdayStrategy.js           # Workday detection (content-based step detection)
+│   │           ├── AshbyStrategy.js             # Ashby detection
+│   │           ├── DeelStrategy.js              # Deel detection
+│   │           ├── SmartRecruitersStrategy.js   # SmartRecruiters detection
+│   │           ├── RippleHireStrategy.js        # RippleHire detection (India-first ATS)
+│   │           ├── iCIMSStrategy.js             # iCIMS detection
+│   │           ├── BambooHRStrategy.js          # BambooHR detection
+│   │           └── TaleoStrategy.js             # Taleo detection
+│   │
+│   ├── config/
+│   │   ├── config.js                    # Runtime config loader; merges env config + user overrides from storage
+│   │   └── env/
+│   │       ├── active.js                # Fallback used by source; build-time plugin rewrites this import
+│   │       ├── development.js           # API_URL=http://localhost:8000/api/v1, RECEIVER_URL=http://localhost:8001
+│   │       ├── staging.js               # Staging URLs
+│   │       └── production.js            # Production URLs
+│   │
+│   ├── content/                          # Content script (runs in page context)
+│   │   ├── bundle.js                    # Entry: isJobPage() guard, JobPulse class, SuccessDetector class
+│   │   └── detectors/
+│   │       ├── base-detector.js         # Abstract detector: extractTitle/Company/Location/JobId
+│   │       ├── detector-factory.js      # Selects detector by URL pattern
+│   │       ├── linkedin-detector.js     # LinkedIn job pages; apply-type detection (Easy Apply vs external)
+│   │       ├── naukri-detector.js       # Naukri job pages
+│   │       └── generic-detector.js      # Any career page; JSON-LD parsing; location heuristics
+│   │
+│   ├── popup/                            # Extension popup UI
+│   │   ├── popup.html                   # Login form + session display (Track Job button to be removed)
+│   │   ├── popup.css                    # Styling
+│   │   └── popup.js                     # Popup logic: login, state display, port to service worker
+│   │
+│   ├── state/
+│   │   └── state-manager.js             # In-memory + persistent state: current job, status, auth
+│   │
+│   └── utils/
+│       ├── normalization.js             # Job title/company/location normalisation; fingerprint hashing
+│       ├── platform.js                  # Platform detection (LinkedIn/Naukri/Greenhouse/Lever/Workday)
+│       └── storage.js                   # chrome.storage.local wrapper: get/set/remove + auth helpers
+│
+└── tests/                                # (all empty — safe to delete)
+    ├── content/
+    └── utils/
+```
+
+**Files to delete (stale, pre-pipeline):**
+
+- `config/` (root) — old CommonJS config, superseded by `src/config/`
+- `build.sh` — old build path, superseded by `build.js`
+- `load-env.sh` — references old build flow
+- `update-config.sh` — references deleted `config/`
+- `structure.txt` — stale file tree
+- `tests/**/*.test.js` — empty files
 
 ---
 
-## 20. Success Metrics (Post-Launch)
+## 8. Session Lifecycle
 
-| Metric | Target |
-|--------|--------|
-| Activation | 60%+ users track at least 1 job |
-| Usage | 5+ jobs tracked per user per week |
-| Retention | 30%+ weekly retention in beta |
-| Paying users | 50 in first 3 months (freemium) |
+```
+initiated ──► redirecting ──► in_progress ──► submitted
+                                       ↘
+                                         abandoned
+```
 
----
+| State | Trigger to enter | Trigger to leave | Timeout |
+|---|---|---|---|
+| `initiated` | User clicks Apply | New tab opens | 5 min → abandoned |
+| `redirecting` | New tab created | Form page detected | 30 s → abandoned |
+| `in_progress` | Form detected | Success page OR tab close OR inactivity | 30 min → abandoned |
+| `submitted` | Success detected | Terminal | — |
+| `abandoned` | Tab closed / timeout / inactivity | Terminal | — |
 
-## 21. Naming Conventions
+**Success detection order (first match wins):**
 
-| Element | Convention | Example |
-|---------|-----------|---------|
-| Files | kebab-case | `application-tracker.js` |
-| Classes | PascalCase | `ApplicationTracker` |
-| Methods | camelCase | `handleApplyClick` |
-| Constants | UPPER_SNAKE | `MAX_INACTIVITY_COUNT` |
-| Session IDs | `session_[timestamp]_[random]` | `session_1789551570367_tpdcrkqw` |
-| Event types | UPPER_SNAKE | `JOB_DETECTED`, `APPLY_CLICKED` |
-| States | lowercase | `initiated`, `in_progress` |
+1. URL pattern — `/confirmation`, `/thank-you`, `/submitted`, `/success`
+2. Iframe URL pattern — checks inside embedded ATS frames
+3. Keyword combinations — `thank you` + `applying`, `received` + `application`, `submitted` + `successfully`
+4. Exact phrases — `application submitted`, `we have received your application`
 
----
-
-## 22. Design Principles
-
-| Principle | What It Means |
-|-----------|--------------|
-| **Backend as source of truth** | Client-side checks are optimization only |
-| **Never pretend success** | Only show "tracked" after backend confirms |
-| **Separation of concerns** | Browser detects, extension coordinates, backend persists |
-| **Extensible architecture** | Adding ATS = add strategy file, no core changes |
-| **Chrome MV3 safe** | No dynamic imports, no eval, no remote code |
-| **Progressive enhancement** | Works on known ATS, degrades gracefully on unknown |
-| **Data first** | Store everything, process later |
+**Abandonment reasons:** `tab_closed`, `tab_closed_before_load`, `tab_closed_during_application`, `inactivity`, `timeout`, `timeout_during_redirect`, `tab_not_found`, `navigation`, `unknown`
 
 ---
 
-## 23. Current Status Summary
+## 9. Message Types Reference
 
-| Area | Status |
-|------|--------|
-| **Extension core** | ✅ 90% complete |
-| **ATS coverage** | ✅ 10 platforms + custom domains |
-| **Success detection** | ✅ 4 methods |
-| **Payload structure** | ✅ Complete |
-| **Backend integration** | ⚠️ HTTP 405 blocking |
-| **Dashboard** | ❌ Not started |
-| **Authentication** | ⚠️ Partial |
-| **Launch readiness** | 🟡 1-2 weeks to MVP launch |
+Extension messages use `chrome.runtime.sendMessage` (broadcast) or a `port` (popup ↔ service worker).
 
----
+| Message | From → To | Payload | Purpose |
+|---|---|---|---|
+| `JOB_DETECTED` | content → SW | `{ job }` | Content script found a job |
+| `APPLY_CLICKED` | content → SW | `{ job, applyUrl, redirectUrl, ... }` | User clicked the apply button (LinkedIn external) |
+| `APPLY_BUTTON_CLICKED` | content → SW | `{ applyType, job, applyUrl }` | Generic apply button click |
+| `SUCCESS_DETECTED` | content → SW | `{ phrase, url, isIframe, detectionMethod }` | Content script saw success markers |
+| `GET_STATE` | popup → SW | `{}` | Popup asks for current state |
+| `CHECK_AUTH` | popup → SW | `{}` | Popup checks if logged in |
+| `TRACK_JOB` | popup → SW | `{}` | **Deprecated** — being removed (§17) |
+| `STATE_UPDATED` | SW → popup | `{ state }` | Broadcast after any state change |
+| `STATE_UPDATE` | SW → popup (port) | `{ state }` | Port-based state push |
+| `TRACK_RESULT` | SW → popup (port) | `{ success, ... }` | **Deprecated** — being removed (§17) |
+| `APPLICATION_SUBMITTED` | SW → popup | `{ payload }` | Notify popup of completed session |
+| `LOGIN` | popup → SW (port) | `{ email, password }` | Popup login form |
+| `LOGIN_SUCCESS` | SW → popup (port) | `{}` | Login succeeded |
+| `LOGIN_ERROR` | SW → popup (port) | `{ error }` | Login failed |
+| `LOGOUT` | popup → SW (port) | `{}` | User clicked logout |
+| `LOGOUT_SUCCESS` | SW → popup (port) | `{}` | Logout done |
 
-## 24. Immediate Next Steps (Priority Order)
-
-| # | Task | Time | Impact |
-|---|------|------|--------|
-| 1 | Fix backend HTTP 405 | 1-2 hours | 🔴 Unblocks everything |
-| 2 | Add `<all_urls>` + `isJobPage()` guard | 1-2 hours | 🔴 10x coverage |
-| 3 | Increase inactivity timeout to 10 min | 5 min | 🔴 Fewer false abandons |
-| 4 | Test on Roku, Payoneer, Nike flows | 1 hour | 🔴 Verify fixes |
-| 5 | Add login page handling | 2 hours | 🟡 Better UX |
-| 6 | Session isolation (`isNewJobPage`) | 1 hour | 🟡 Clean data |
-| 7 | Build simple dashboard | 1-2 days | 🟡 User visibility |
-| 8 | Get 10 beta users | 1 week | 🟡 Real feedback |
+**Note:** after cleanup, `TRACK_JOB` and `TRACK_RESULT` disappear.
 
 ---
 
-## 25. Glossary
+## 10. ATS Platforms Supported
 
-| Term | Meaning |
-|------|---------|
-| **ATS** | Applicant Tracking System (Greenhouse, Lever, Workday, etc.) |
-| **Job Board** | LinkedIn, Naukri, Indeed — where jobs are found |
-| **Company Career Page** | Custom domain where companies post jobs |
-| **Iframe** | Embedded page inside another page (Greenhouse embeds) |
-| **Session** | One job application from Apply click to submitted/abandoned |
-| **State** | Current phase of session (initiated, redirecting, etc.) |
-| **Strategy** | Logic for detecting/analyzing a specific ATS |
-| **Payload** | Data sent to backend when application is submitted |
-| **URL Chain** | All URLs the user visited during application |
-| **Job ID** | Unique identifier for a job on a specific platform |
-| **Success Detection** | Confirming user submitted the application |
+| Priority | ATS | Domain / Detection |
+|---|---|---|
+| 10 | Greenhouse | `greenhouse.io`, `grnh.se`, or query param `gh_jid=` / `gh_src=` |
+| 9 | Lever | `lever.co`, `jobs.lever.co` |
+| 8 | Workday | `myworkdayjobs.com`, `workday.com` |
+| 7 | Ashby | `ashbyhq.com`, `ashby.com` |
+| 7 | Deel | `deel.com`, `jobs.deel.com` |
+| 6 | SmartRecruiters | `smartrecruiters.com` |
+| 6 | RippleHire | `ripplehire.com` |
+| 5 | iCIMS | `icims.com` |
+| 4 | BambooHR | `bamboohr.com` |
+| 3 | Taleo | `taleo.net` |
+| 0 | Generic | any URL (fallback) |
+
+**Greenhouse custom domains:** Greenhouse can be embedded on a company's own domain via `?gh_jid=` — e.g. `payoneer.com/careers/position/8019863?gh_jid=8019863`. The strategy detects this even though the domain isn't `greenhouse.io`.
 
 ---
 
-## 26. Environment Setup
+## 11. Chrome MV3 Constraints
 
-### Prerequisites
+These are non-negotiable. Breaking any of them causes silent failures or build rejections.
 
-| Tool | Version |
-|------|---------|
-| Node.js | 16+ |
-| npm | 8+ |
-| Chrome | Latest |
+| Constraint | What it means |
+|---|---|
+| **No dynamic imports in the service worker** | `import()` is blocked in MV3 SWs. All states are pre-loaded via `state-registry.js` with static imports. |
+| **Service worker is ESM** | `manifest.json` declares `"type": "module"`. Bundled as ESM by `build.js`. |
+| **Content script is IIFE** | No module syntax at runtime. Bundled as IIFE by `build.js`. |
+| **`all_frames: true`** | Content script runs inside iframes (needed for embedded ATS forms like Greenhouse). |
+| **`host_permissions: ["<all_urls>"]`** | Broad permission, guarded at runtime by `isJobPage()`. |
+| **No `eval`, no remote code** | Chrome Web Store rejects anything that loads remote JS. |
+| **`chrome.storage.local` only** | `sync` has quota limits and isn't needed for session data. |
 
-### Build
+---
+
+## 12. Build System
+
+`build.js` runs **two** esbuild builds:
+
+| Target | Entry | Output | Format |
+|---|---|---|---|
+| Content script | `src/content/bundle.js` | `dist/src/content/bundle.js` | IIFE |
+| Service worker | `src/background/service-worker.js` | `dist/src/background/service-worker.js` | ESM |
+
+### The env-alias plugin
+
+Source never names a specific env file. It always imports `./env/active.js`. The build-time plugin rewrites that import to `./env/<BUILD_ENV>.js` — `development.js`, `staging.js`, or `production.js`.
+
+```js
+// build.js (excerpt)
+const envAliasPlugin = {
+  name: 'env-alias',
+  setup(build) {
+    build.onResolve({ filter: /\/env\/active\.js$/ }, (args) => {
+      const replaced = args.path.replace(/\/env\/active\.js$/, `/env/${activeEnvFile}`);
+      return { path: path.resolve(args.resolveDir, replaced), external: false };
+    });
+  }
+};
+```
+
+This means `src/config/env/active.js` is **never bundled**. It's a fallback for source-only runs.
+
+### Production sanity check
+
+`NODE_ENV=production npm run build` runs `verifyNoDevUrlsInProd()`, which fails the build if any of these strings appear in the bundle:
+
+- `localhost:8000`
+- `localhost:3000`
+- `staging-api.jobpulse.io`
+- `staging.jobpulse.io`
+
+If it fails, the env-alias plugin didn't wire up correctly.
+
+### Commands
 
 ```bash
 npm install
-npm run build
+npm run build          # development build
+npm run watch          # watch mode
+NODE_ENV=production npm run build   # production build
 ```
 
 ### Load in Chrome
 
-| Step | Action |
-|------|--------|
-| 1 | `chrome://extensions/` |
-| 2 | Enable Developer Mode |
-| 3 | Click "Load unpacked" |
-| 4 | Select `dist/` folder |
-
-### Watch Mode
-
-```bash
-npm run watch
+```
+chrome://extensions/ → Developer mode ON → Load unpacked → select dist/
 ```
 
 ---
 
-## 27. Backend Stack (Recommended)
+## 13. Environment Config
 
-| Component | Technology |
-|-----------|------------|
-| Framework | FastAPI (Python) |
-| Database 1 (raw) | PostgreSQL with JSONB |
-| Database 2 (analytics) | PostgreSQL (normalized) |
-| Hosting | Render / Railway / AWS |
-| Auth | JWT |
+**`src/config/env/development.js`:**
 
-### Backend Structure (Planned)
-
-```
-jobpulse_backend/
-├── app/
-│   ├── main.py
-│   ├── api/v1/endpoints/
-│   │   ├── sync.py
-│   │   ├── jobs.py
-│   │   ├── applications.py
-│   │   └── users.py
-│   ├── ats/                ← Pluggable ATS modules
-│   ├── services/
-│   └── db/
-├── requirements.txt
-└── README.md
+```js
+export default {
+  API_URL: 'http://localhost:8000/api/v1',       // Layer 3
+  RECEIVER_URL: 'http://localhost:8001',         // Layer 2A
+  WEBSITE_URL: 'http://localhost:3000',
+  DASHBOARD_URL: 'http://localhost:3000/dashboard',
+  DEBUG: true,
+  LOG_LEVEL: 'debug',
+  BACKEND_TIMEOUT: 30000,
+  RETRY_ATTEMPTS: 3,
+  RETRY_DELAY: 1000
+};
 ```
 
----
-
-## 28. Contact / Project Owner
-
-This is a solo-developer project. For questions about implementation:
-
-- **Focus:** Automatic job application tracking
-- **Stack:** Chrome extension + FastAPI backend
-- **Market:** India-first, global second
-- **Business model:** Freemium (planned)
+**Runtime override:** `chrome.storage.local.user_config.API_URL` / `.RECEIVER_URL` takes precedence over build-time config. Read via `getConfig()` / `getApiUrl()` / `getReceiverUrl()`.
 
 ---
 
-## 29. What a New Chat Should Know
+## 14. Popup (Target State)
 
-**If you're picking this up in a new chat, here's what matters:**
+**Read-only.** Displays detected job + current session state. No HTTP calls, no mutation.
 
-1. **The extension is 90% complete** and working on 10 ATS platforms
-2. **The main blocker is the backend HTTP 405 error**
-3. **The next big lift is `<all_urls>` support** with an `isJobPage()` guard
-4. **Success detection has 4 methods** (URL, iframe, keywords, phrases)
-5. **The payload structure is finalized** — see Section 9
-6. **The 5-state machine** drives all transitions
-7. **Chrome MV3 constraints:** No dynamic imports, use `state-registry.js`
-8. **The session data structure** is in Section 17
-9. **Don't remove features** — always preserve existing functionality
-10. **Follow the design patterns** listed in Section 6
+### Detected job + active session
+
+```
+┌─────────────────────────────────┐
+│  💼 JobPulse              [Logout]│
+├─────────────────────────────────┤
+│  📌 Senior Backend Engineer     │
+│     Acme Technologies           │
+│     Bengaluru, India            │
+│     via LinkedIn                │
+│                                 │
+│  🔄 Session: in_progress        │
+│     Step: Application Form      │
+│     URLs tracked: 3             │
+│     Elapsed: 1m 24s             │
+│                                 │
+├─────────────────────────────────┤
+│  📊 Dashboard        v0.1.0     │
+└─────────────────────────────────┘
+```
+
+### No job detected
+
+```
+┌─────────────────────────────────┐
+│  💼 JobPulse              [Logout]│
+├─────────────────────────────────┤
+│         🔍                      │
+│                                 │
+│    No job detected              │
+│    Navigate to a job page       │
+│    to start tracking            │
+│                                 │
+├─────────────────────────────────┤
+│  📊 Dashboard        v0.1.0     │
+└─────────────────────────────────┘
+```
+
+### Not authenticated
+
+```
+┌─────────────────────────────────┐
+│  💼 JobPulse                    │
+├─────────────────────────────────┤
+│  🔐 Sign in to track jobs       │
+│                                 │
+│  [Email]                        │
+│  [Password]                     │
+│  [Sign In]                      │
+│                                 │
+│  Don't have an account? Sign up │
+└─────────────────────────────────┘
+```
+
+**What was removed:** the "Track Job" button. It called `/jobs/track` on Layer 3, which doesn't exist. The extension never writes applications to Layer 3 — that's the whole point of the pipeline. See §17.
 
 ---
 
-## 30. Version History
+## 15. Debugging Console Helpers
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 0.1.0 | 2026-09 | Initial extension with 10 ATS, URL chain, job IDs |
-| 0.2.0 (planned) | 2026-10 | `<all_urls>`, login handling, backend fix |
-| 0.3.0 (planned) | 2026-11 | Dashboard, authentication |
-| 0.4.0 (planned) | 2026-12 | Auto-fill |
-| 0.5.0 (planned) | 2027-01 | Resume matching |
-| 1.0.0 (planned) | 2027-Q1 | Public launch |
+Run these in the appropriate console (service worker console for SW-scoped, page console for content-script-scoped).
+
+### Service worker console (`chrome://extensions/` → "service worker")
+
+```js
+// All sessions currently in storage
+chrome.storage.local.get('sessionManagerData', (r) => {
+  const d = r.sessionManagerData;
+  if (d?.sessions) {
+    console.log('Total sessions:', d.sessions.length);
+    d.sessions.forEach(([id, s]) => console.log(id, s.status, s.jobTitle));
+  }
+});
+
+// Failed event submissions (retry queue)
+chrome.storage.local.get('failedSubmissions', (r) => {
+  const failed = r.failedSubmissions || [];
+  console.log('Failed:', failed.length);
+  failed.forEach((f, i) => {
+    console.log(`#${i+1}:`, f.payload.payload.jobTitle, 'at', f.payload.payload.company);
+  });
+});
+
+// Full payload of the last failed submission
+chrome.storage.local.get('failedSubmissions', (r) => {
+  const failed = r.failedSubmissions || [];
+  const last = failed[failed.length - 1];
+  if (last) console.log(JSON.stringify(last.payload, null, 2));
+});
+
+// Current auth token presence
+chrome.storage.local.get('access_token', (r) => {
+  console.log('Token present:', !!r.access_token);
+});
+
+// Abandoned sessions log
+chrome.storage.local.get('abandonedSessions', (r) => {
+  console.log('Abandoned:', (r.abandonedSessions || []).length);
+});
+```
+
+### Page console (on a job page)
+
+```js
+// Job detected by JobPulse
+JSON.parse(document.body.dataset.jobpulseJob || 'null')
+
+// Apply-click payload captured
+JSON.parse(document.body.dataset.jobpulseApply || 'null')
+
+// Force a re-detect
+window.dispatchEvent(new CustomEvent('jobpulse-refresh'))
+
+// Confirm the content script injected
+document.querySelector('meta[name="jobpulse-injected"]')?.content
+```
 
 ---
+
+## 16. Session Object Notes
+
+The full session shape is documented in `SessionFactory.createSession()`. Key points for anyone reading persisted sessions:
+
+- **`session.currentState`** is a live state **instance**, not serializable. On persist it becomes `null`; on restore it's re-created from `status`.
+- **`session.atsStrategy`** is also a live instance. On persist it becomes `null`; on restore it's re-created via `StrategyFactory.getStrategy(jobUrl)`.
+- **`session.visitedUrls`** is the URL chain — **ordered**. Each entry: `{ order, url, label, timestamp, tabId, title, jobId }`.
+- **`session.trackedTabs`** is the list of Chrome tab IDs belonging to this session. Includes the source tab (LinkedIn), the redirect tab (ATS), and any subsequent tabs opened from them.
+- **`session.jobIds`** is a map: `{ linkedin: '...', greenhouse: '...', external: '...' }`.
+- **`session.externalJobId`** is the first non-LinkedIn job ID seen.
+
+### Known issue — URL chain can be short
+
+For an external-redirect flow, `visitedUrls` **should** have at least 3 entries (LinkedIn, safety redirect, ATS page). If a real session produces a chain of only 1, the likely cause is:
+
+`ApplicationTracker.handleTabCreated` transitions the session to `redirecting` and maps the new tab, but does **not** push the new tab's URL into `visitedUrls`. The push only happens later when `TabUpdatedObserver` fires `URL_CHANGED`. If that event doesn't fire for the initial navigation of a new tab (which Chrome sometimes skips), the URL is lost.
+
+**Fix candidate:** in `handleTabCreated`, when mapping a tab to a session, fetch the tab's current URL via `chrome.tabs.get(tabId)` and push it into `visitedUrls` if not already present.
+
+---
+
+## 17. What's Broken / Needs Deletion
+
+### 🔴 Popup "Track Job" button hits dead routes
+
+The popup calls `POST /api/v1/jobs/track` and `POST /api/v1/jobs/status`. **Layer 3 has no `/jobs` router** — verified from source (`app/api/v1/router.py` doesn't register one). Every click 404s.
+
+**This is pre-pipeline code.** The extension should never write applications to Layer 3. Fix by deletion, not by adding routes.
+
+| File | Remove |
+|---|---|
+| `src/api/client.js` | `trackJob()`, `checkJobStatus()`, `getTrackedJobs()` |
+| `src/background/service-worker.js` | `checkJobStatus()` method, `handleTrackJob()` method, `case 'TRACK_JOB'` in both message handlers, calls to `this.checkJobStatus(...)` |
+| `src/popup/popup.html` | `<button id="trackBtn">`, `<div id="trackedStatus">` |
+| `src/popup/popup.js` | `trackBtn` / `trackedStatus` refs, click listener, `handleTrackJob()`, `handleTrackResult()`, `case 'TRACK_RESULT'`, tracked-status block in `showJobDetected()` |
+
+**Replacement:** read-only session display (§14). No buttons, no HTTP to Layer 3, no mutation.
+
+### 🟢 Non-blocking quirks
+
+| Issue | Where | Notes |
+|---|---|---|
+| Strategy re-evaluation is one-way | `ApplicationTracker.processSessionUpdate` | Once upgraded from `generic`, never re-checked |
+| `SubmittedState.buildAndSendPayload()` not awaited | `SubmittedState.js` | Fire-and-forget; failures go to `failedSubmissions` |
+| `AbandonedState` has duplicated reason maps | `AbandonedState.js` | Cosmetic |
+| `SubmittedState.cleanup()` runs before async send completes | `SubmittedState.js` | Fine today; fragile if send ever needs to be awaited |
+| Redundant `import { getConfig }` | `service-worker.js` | Dead import |
+
+---
+
+## 18. What's Left To Do
+
+| # | Task | Blocking |
+|---|---|---|
+| 1 | Delete `trackJob`, `checkJobStatus`, `getTrackedJobs` from `client.js` | 🔴 |
+| 2 | Delete `handleTrackJob`, `checkJobStatus`, `TRACK_JOB` cases from service-worker | 🔴 |
+| 3 | Remove Track button + `TRACK_JOB` flow from popup | 🔴 |
+| 4 | Add read-only session display to popup (§14) | 🔴 |
+| 5 | Delete stale root files (§7) | 🟡 |
+| 6 | Rebuild `npm run build` | 🔴 |
+| 7 | Grep bundle to confirm no `/jobs/*` or `/applications/*` strings | 🔴 |
+| 8 | Load unpacked in Chrome, verify no console errors | 🔴 |
+| 9 | End-to-end test against live Layer 2A | 🔴 |
+| 10 | Verify URL chain has 3+ entries for external redirects (§16) | 🟡 |
+
+---
+
+## 19. What the Extension Does Not Do
+
+Explicit scope boundaries — prevents creep.
+
+- ❌ Does not write to Layer 3
+- ❌ Does not read application data from Layer 3 (auth only)
+- ❌ Does not store applications locally (events go to Layer 2A)
+- ❌ Does not track general browsing (only job application flows)
+- ❌ Does not auto-fill forms (future feature)
+- ❌ Does not scrape job descriptions (future)
+- ❌ Does not match or tailor resumes (future)
+- ❌ Does not display application history (that's the Layer 3 frontend)
+
+---
+
+## 20. Design Principles
+
+| Principle | Meaning |
+|---|---|
+| **Write to Layer 2 only** | Events go to the receiver. Never to Layer 3. |
+| **Read from Layer 3 for auth only** | Login + `me`. Never application data. |
+| **Backend is source of truth** | Client-side checks are optimization only |
+| **Never pretend success** | Only mark "tracked" after Layer 2A confirms |
+| **Chrome MV3 safe** | No dynamic imports, no `eval`, no remote code |
+| **Extensible** | Adding an ATS = adding one strategy file |
+| **Data first** | Ship everything to Layer 2; process later |
+| **Adapter is the seam** | Wire shape lives in one file (`receiver-adapter.js`) |
+
+---
+
+## 21. How to Continue in a New Chat
+
+1. Share this README with the new chat.
+2. Share any file you plan to modify.
+3. **Do not add new HTTP calls to Layer 3.** The extension's Layer 3 surface is auth only. If you think you need one, re-read §1.
+4. Local project: `/Volumes/work/codebase/tracker_extension/`
+5. Two HTTP clients, two layers — never merge them:
+   - `src/api/client.js` → Layer 3 (auth)
+   - `src/background/api/receiver-api.js` → Layer 2A (events)
+6. Key files:
+   - `src/api/client.js` — Layer 3 client (auth only)
+   - `src/background/api/receiver-api.js` — Layer 2A client
+   - `src/background/adapters/receiver-adapter.js` — payload shape
+   - `src/background/managers/ApplicationTracker.js` — core session logic
+   - `src/background/managers/SessionManager.js` — session storage
+   - `src/background/service-worker.js` — orchestration
+   - `src/popup/popup.js` + `popup.html` — popup UI
+   - `manifest.json` — MV3 config
+   - `build.js` — bundler + env alias
+7. **If a new chat proposes writing to Layer 3 from the extension — stop it.** That's the exact violation this README exists to prevent.
+
+---
+
+**End of Layer 1 README.**

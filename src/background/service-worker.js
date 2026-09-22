@@ -18,10 +18,10 @@ class ServiceWorker {
     this.apiClient = API_CLIENT;
     this.isInitialized = false;
 
-    // ✅ FIX: Track processed apply clicks to avoid duplicates
+    // Track processed apply clicks to avoid duplicates
     this.processedApplyClicks = new Set();
 
-    // ✅ FIX: Cleanup interval for processed clicks
+    // Cleanup interval for processed clicks
     this.cleanupInterval = setInterval(() => {
       this.cleanupProcessedClicks();
     }, 30000); // Clean every 30 seconds
@@ -109,14 +109,8 @@ class ServiceWorker {
 
   /**
    * Clean up old processed clicks
-   * Removes entries older than 60 seconds
    */
   cleanupProcessedClicks() {
-    const now = Date.now();
-    const maxAge = 60000; // 60 seconds
-
-    // Since we only store keys (not timestamps), we'll clear all periodically
-    // A more sophisticated approach would store timestamps
     if (this.processedApplyClicks.size > 100) {
       console.log(`[JobPulse] Cleaning up ${this.processedApplyClicks.size} processed clicks`);
       this.processedApplyClicks.clear();
@@ -130,25 +124,18 @@ class ServiceWorker {
   setupListeners() {
     console.log('[JobPulse] Setting up listeners');
 
-    // Tab updates (SPA navigation)
-    chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-      if (changeInfo.url || changeInfo.status === 'complete') {
-        this.handleTabChange(tabId, tab.url);
-      }
-    });
+    // NOTE: Tab observation (onUpdated, onCreated, onRemoved) is handled
+    // exclusively by the TabObserver classes registered in ApplicationTracker.
+    // Do NOT add direct chrome.tabs.onUpdated / onCreated / onRemoved listeners
+    // here — they would double-fire every event.
 
-    // Tab activation
+    // Tab activation — only fired when the user switches tabs.
+    // Not handled by any observer, so it stays here.
     chrome.tabs.onActivated.addListener((activeInfo) => {
       chrome.tabs.get(activeInfo.tabId, (tab) => {
+        if (!tab || !tab.url) return;
         this.handleTabChange(tab.id, tab.url);
       });
-    });
-
-    // Tab creation (for external redirects)
-    chrome.tabs.onCreated.addListener((tab) => {
-      if (tab.url && tab.url !== 'chrome://newtab/') {
-        console.log('[JobPulse] New tab detected:', tab.url);
-      }
     });
 
     // Messages from content scripts and popup
@@ -163,6 +150,13 @@ class ServiceWorker {
           this.handlePopupMessage(message, port);
         });
       }
+    });
+
+    // Notification button clicks
+    chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+      console.log(`[JobPulse] Notification button clicked: ${notificationId}, button ${buttonIndex}`);
+      // Button 0 = "View Job", Button 1 = "Dismiss"
+      chrome.notifications.clear(notificationId);
     });
 
     // Session events from ApplicationTracker
@@ -188,7 +182,6 @@ class ServiceWorker {
             console.log(`[JobPulse]   Reference: ${data.applicationReference}`);
           }
 
-          // Update state
           this.stateManager.setJobStatus({
             tracked: true,
             status: 'applied',
@@ -197,7 +190,6 @@ class ServiceWorker {
             atsName: data.atsName
           });
 
-          // Notify popup
           chrome.runtime.sendMessage({
             type: 'APPLICATION_SUBMITTED',
             payload: data
@@ -293,10 +285,6 @@ class ServiceWorker {
     console.log('[JobPulse] Message received:', message.type);
 
     switch (message.type) {
-      // ============================================
-      // JOB DETECTION
-      // ============================================
-
       case 'JOB_DETECTED':
         await this.stateManager.setJob(message.payload);
         await this.checkJobStatus(message.payload);
@@ -308,10 +296,6 @@ class ServiceWorker {
         const state = await this.stateManager.getState();
         sendResponse({ state });
         break;
-
-      // ============================================
-      // APPLY TRACKING
-      // ============================================
 
       case 'APPLY_CLICKED':
         await this.handleApplyClick(message.payload, sender);
@@ -328,27 +312,15 @@ class ServiceWorker {
         sendResponse(result);
         break;
 
-      // ============================================
-      // ✅ SUCCESS DETECTION (Content + Iframe)
-      // ============================================
-
       case 'SUCCESS_DETECTED':
         await this.handleSuccessDetected(message.payload, sender);
         sendResponse({ success: true });
         break;
 
-      // ============================================
-      // JOB TRACKING
-      // ============================================
-
       case 'TRACK_JOB':
         const trackResult = await this.handleTrackJob(message.job);
         sendResponse(trackResult);
         break;
-
-      // ============================================
-      // AUTHENTICATION
-      // ============================================
 
       case 'CHECK_AUTH':
         try {
@@ -369,14 +341,9 @@ class ServiceWorker {
   // APPLY HANDLERS
   // ============================================
 
-  /**
-   * Handle apply click from content script
-   * ✅ FIX: Added deduplication to prevent duplicate sessions
-   */
   async handleApplyClick(payload, sender) {
     console.log('[JobPulse] Apply click received:', payload);
 
-    // ✅ DEDUPLICATION: Check if this click was already processed
     const dedupKey = this.getApplyClickDedupKey(payload, sender);
 
     if (this.isDuplicateApplyClick(dedupKey)) {
@@ -384,12 +351,10 @@ class ServiceWorker {
       return;
     }
 
-    // Mark as processed
     this.markApplyClickProcessed(dedupKey);
     console.log(`[JobPulse] ✅ Marked apply click as processed: ${dedupKey}`);
 
     try {
-      // Get current job from state
       const currentState = await this.stateManager.getState();
       const job = payload.job || currentState.job;
 
@@ -398,10 +363,8 @@ class ServiceWorker {
         return;
       }
 
-      // Extract redirect URL from LinkedIn's safety redirect
       let redirectUrl = payload.redirectUrl || payload.applyUrl;
 
-      // ✅ FIX: Handle null/empty redirectUrl
       if (payload.applyUrl && payload.applyUrl.includes('safety/go?url=')) {
         try {
           const urlParams = new URLSearchParams(payload.applyUrl.split('?')[1]);
@@ -414,17 +377,14 @@ class ServiceWorker {
         }
       }
 
-      // ✅ FIX: If redirectUrl is still null, try to use applyUrl
       if (!redirectUrl && payload.applyUrl) {
         redirectUrl = payload.applyUrl;
       }
 
-      // ✅ FIX: If still null, log warning but continue
       if (!redirectUrl) {
         console.warn('[JobPulse] No redirect URL found in apply click');
       }
 
-      // Prepare apply data
       const applyData = {
         applyUrl: payload.applyUrl,
         redirectUrl: redirectUrl,
@@ -434,13 +394,11 @@ class ServiceWorker {
         timestamp: payload.timestamp || Date.now()
       };
 
-      // Delegate to ApplicationTracker
       const session = await applicationTracker.handleApplyClick({
         jobData: job,
         applyData: applyData
       });
 
-      // Update state with apply info
       await this.stateManager.setJob({
         ...job,
         lastApplyClick: {
@@ -451,22 +409,9 @@ class ServiceWorker {
         }
       });
 
-      // Send to API if authenticated
-      if (this.apiClient.isAuthenticated()) {
-        try {
-          await this.apiClient.trackApplyClick({
-            jobId: job.externalJobId,
-            jobTitle: job.title,
-            company: job.company,
-            redirectUrl: redirectUrl,
-            applyUrl: payload.applyUrl,
-            timestamp: applyData.timestamp
-          });
-          console.log('[JobPulse] Apply click sent to API');
-        } catch (error) {
-          console.warn('[JobPulse] Failed to send apply click to API:', error.message);
-        }
-      }
+      // REMOVED: previous block that called this.apiClient.trackApplyClick(...)
+      // Apply clicks are now tracked exclusively by ApplicationTracker via the
+      // session system. No HTTP call is made to Layer 3 on apply click.
 
       this.broadcastStateUpdate();
       console.log('[JobPulse] ✅ Apply click processed, session:', session?.sessionId);
@@ -476,9 +421,6 @@ class ServiceWorker {
     }
   }
 
-  /**
-   * Handle apply initiated from content script
-   */
   async handleApplyInitiated(payload, sender) {
     console.log('[JobPulse] Apply initiated:', payload);
 
@@ -491,21 +433,15 @@ class ServiceWorker {
   }
 
   // ============================================
-  // ✅ SUCCESS DETECTION HANDLER
+  // SUCCESS DETECTION HANDLER
   // ============================================
 
-  /**
-   * Handle success detected from content script (main frame or iframe)
-   * @param {Object} payload - Success payload
-   * @param {Object} sender - Message sender
-   */
   async handleSuccessDetected(payload, sender) {
     console.log('[JobPulse] 🎉 Success detected from content:', payload.phrase);
     console.log('[JobPulse]   URL:', payload.url);
     console.log('[JobPulse]   From iframe:', payload.isIframe ? 'yes' : 'no');
     console.log('[JobPulse]   Method:', payload.detectionMethod || 'content');
 
-    // Get tab ID (for iframe, sender.tab.id is the parent tab)
     const tabId = sender.tab?.id;
     if (!tabId) {
       console.warn('[JobPulse] No tab ID in success message');
@@ -514,11 +450,9 @@ class ServiceWorker {
 
     console.log('[JobPulse] Looking for session for tab:', tabId);
 
-    // Find session for this tab
     let session = sessionManager.getSessionByTabId(tabId);
 
     if (!session) {
-      // Fallback: search all active sessions for this tab
       const allSessions = sessionManager.getActiveSessions();
       session = allSessions.find(s =>
         s.trackedTabs && s.trackedTabs.includes(tabId)
@@ -530,7 +464,6 @@ class ServiceWorker {
       return;
     }
 
-    // Skip if already submitted
     if (session.status === 'submitted') {
       console.log('[JobPulse] Session already submitted, skipping');
       return;
@@ -538,16 +471,9 @@ class ServiceWorker {
 
     console.log('[JobPulse] ✅ Notifying ApplicationTracker:', session.sessionId);
 
-    // ✅ Notify ApplicationTracker
-    // ApplicationTracker.handleSuccessDetected() will:
-    // 1. Update session to submitted
-    // 2. Transition to SubmittedState
-    // 3. Trigger SubmittedState.onEnter()
-    // 4. Build and send payload
     if (applicationTracker && typeof applicationTracker.handleSuccessDetected === 'function') {
       applicationTracker.handleSuccessDetected(session, payload);
     } else {
-      // Fallback: if ApplicationTracker not available, update session directly
       console.warn('[JobPulse] ApplicationTracker not available, updating session directly');
 
       await sessionManager.updateSession(session.sessionId, {
@@ -558,7 +484,6 @@ class ServiceWorker {
         successDetectionMethod: payload.detectionMethod || 'content'
       });
 
-      // Notify popup
       chrome.runtime.sendMessage({
         type: 'APPLICATION_SUBMITTED',
         payload: {
@@ -674,16 +599,10 @@ class ServiceWorker {
     }).catch(() => {});
   }
 
-  /**
-   * Get session statistics
-   */
   getSessionStats() {
     return applicationTracker.getStats();
   }
 
-  /**
-   * Get all active sessions
-   */
   getActiveSessions() {
     return sessionManager.getActiveSessions();
   }

@@ -122,7 +122,7 @@ class JobPulse {
         this.storeJob(job);
         this.exposeJobToPage(job);
 
-        // ✅ Apply Button Detection & Click Tracking
+        // Apply Button Detection & Click Tracking
         this.setupApplyButtonDetection();
         this.setupApplyClickTracking();
 
@@ -185,7 +185,7 @@ class JobPulse {
   }
 
   // ============================================
-  // ✅ APPLY BUTTON DETECTION & CLICK TRACKING
+  // APPLY BUTTON DETECTION & CLICK TRACKING
   // ============================================
 
   setupApplyButtonDetection() {
@@ -386,17 +386,15 @@ class JobPulse {
   }
 
   // ============================================
-  // ✅ APPLY CLICK TRACKING (Sends to Background)
+  // APPLY CLICK TRACKING (Sends to Background)
   // ============================================
 
   setupApplyClickTracking() {
     console.log('[JobPulse] Setting up apply click tracking...');
 
-    // Find the apply button using the specific selector that works
     const applyButton = document.querySelector('a[aria-label*="Apply on company website"]');
 
     if (applyButton) {
-      // Prevent duplicate listeners
       if (applyButton.dataset.jobpulseTracked === 'true') {
         console.log('[JobPulse] Apply tracking already set up');
         return;
@@ -430,7 +428,6 @@ class JobPulse {
         console.log('  Company:', this.currentJob?.company || 'unknown');
         console.log('========================================');
 
-        // Store in data attribute
         document.body.dataset.jobpulseApply = JSON.stringify({
           jobId: this.currentJob?.externalJobId || 'unknown',
           jobTitle: this.currentJob?.title || 'unknown',
@@ -440,7 +437,6 @@ class JobPulse {
           timestamp: new Date().toISOString()
         });
 
-        // ✅ Send to background for full tracking
         try {
           chrome.runtime.sendMessage({
             type: 'APPLY_CLICKED',
@@ -568,7 +564,8 @@ class JobPulse {
  * 2. Checking iframe URL for confirmation paths
  * 3. Keyword-based detection (combines words like thank + apply)
  *
- * Runs in both main frame and iframes (via manifest all_frames: true)
+ * Runs in both main frame and ATS iframes (via manifest all_frames: true),
+ * but bails out early in non-ATS iframes (ads, embeds, etc.) for performance.
  */
 class SuccessDetector {
   constructor() {
@@ -576,7 +573,50 @@ class SuccessDetector {
     this.observer = null;
     this.intervalId = null;
     this.isIframe = window !== window.top;
+
+    // Performance guard: skip non-ATS iframes entirely.
+    // Prevents 2-second polling loops running inside ads, embeds, tracking
+    // pixels, videos, etc. on every page the user visits.
+    if (this.isIframe && !this.isLikelyAtsFrame()) {
+      console.log('[JobPulse] SuccessDetector: skipping non-ATS iframe');
+      return;
+    }
+
     this.startWatching();
+  }
+
+  /**
+   * Check if this iframe is likely an ATS confirmation frame.
+   * Uses the iframe's own URL. Cross-origin iframe hrefs are readable
+   * from inside the frame itself.
+   *
+   * @returns {boolean}
+   */
+  isLikelyAtsFrame() {
+    try {
+      const href = (window.location.href || '').toLowerCase();
+
+      const atsPatterns = [
+        'greenhouse.io',
+        'grnh.se',
+        'lever.co',
+        'myworkdayjobs.com',
+        'workday.com',
+        'ashbyhq.com',
+        'ashby.com',
+        'smartrecruiters.com',
+        'icims.com',
+        'bamboohr.com',
+        'taleo.net',
+        'deel.com',
+        'ripplehire.com'
+      ];
+
+      return atsPatterns.some(p => href.includes(p));
+    } catch (e) {
+      // Sandboxed iframe without allow-same-origin — cannot read href
+      return false;
+    }
   }
 
   startWatching() {
@@ -679,11 +719,9 @@ class SuccessDetector {
    * @returns {Object} { detected: boolean, reason: string }
    */
   detectSuccessByKeywords(text) {
-    // Guard: text must be non-empty and reasonably short
     if (!text || text.length < 10) return { detected: false };
-    if (text.length > 5000) return { detected: false }; // Too long = job description
+    if (text.length > 5000) return { detected: false };
 
-    // Guard: check for job description signals
     const jobDescSignals = [
       'responsibilities:',
       'requirements:',
@@ -697,9 +735,7 @@ class SuccessDetector {
       return { detected: false };
     }
 
-    // ============================================
     // Rule 1: Thank + Action
-    // ============================================
     const thankWords = ['thank you', 'thanks for', 'thanks!', 'we appreciate'];
     const actionWords = [
       'applying', 'apply', 'application', 'submission',
@@ -713,9 +749,7 @@ class SuccessDetector {
       return { detected: true, reason: 'thank_you_apply' };
     }
 
-    // ============================================
     // Rule 2: Received + Application
-    // ============================================
     const receiveWords = ['received', 'recieved'];
     const appWords = ['application', 'submission', 'cv', 'resume'];
 
@@ -726,9 +760,7 @@ class SuccessDetector {
       return { detected: true, reason: 'received_application' };
     }
 
-    // ============================================
     // Rule 3: Submitted + Success
-    // ============================================
     const submitWords = ['submitted', 'submission complete'];
     const successWords = ['successfully', 'complete', 'confirmed', 'confirmation'];
 
@@ -739,9 +771,7 @@ class SuccessDetector {
       return { detected: true, reason: 'submitted_successfully' };
     }
 
-    // ============================================
     // Rule 4: Strong single phrases (fallback)
-    // ============================================
     const strongPhrases = [
       'application submitted',
       'application received',
@@ -767,7 +797,6 @@ class SuccessDetector {
 
     console.log(`[JobPulse] Success detection: method=${detectionMethod}, phrase="${phrase}"`);
 
-    // Send to background
     try {
       chrome.runtime.sendMessage({
         type: 'SUCCESS_DETECTED',
@@ -790,7 +819,6 @@ class SuccessDetector {
       console.warn('[JobPulse] Could not send success to background:', e);
     }
 
-    // Cleanup
     if (this.observer) this.observer.disconnect();
     if (this.intervalId) clearInterval(this.intervalId);
   }
@@ -805,20 +833,12 @@ console.log('[JobPulse] Content script loaded on:', window.location.href);
 if (isJobPage()) {
   console.log('[JobPulse] ✅ Job page detected, initializing...');
 
-  // ============================================
-  // INITIALIZE
-  // ============================================
-
   const marker = document.createElement('meta');
   marker.name = 'jobpulse-injected';
   marker.content = 'true';
   document.head.appendChild(marker);
 
   const jobpulse = new JobPulse();
-
-  // ============================================
-  // EXPOSE TO PAGE CONTEXT
-  // ============================================
 
   const originalDetect = jobpulse.detect.bind(jobpulse);
   jobpulse.detect = async function() {

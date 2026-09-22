@@ -1,6 +1,7 @@
 // src/config/env/development.js
 export default {
   API_URL: 'http://localhost:8000/api/v1',
+  RECEIVER_URL: 'http://localhost:8001',
   WEBSITE_URL: 'http://localhost:3000',
   DASHBOARD_URL: 'http://localhost:3000/dashboard',
   DEBUG: true,

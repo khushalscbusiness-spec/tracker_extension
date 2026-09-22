@@ -94,11 +94,9 @@ export class ApplicationTracker {
    */
   setupSessionCallbacks() {
     sessionManager.onSessionChange((event, session) => {
-      // Handle session state changes
       if (event === 'session_updated') {
         this.handleSessionUpdate(session);
       }
-
       if (event === 'session_created') {
         this.handleSessionCreated(session);
       }
@@ -111,10 +109,6 @@ export class ApplicationTracker {
 
   /**
    * Handle apply button click from content script
-   * @param {Object} data - Apply data from content script
-   * @param {Object} data.jobData - Job data from LinkedIn
-   * @param {Object} data.applyData - Apply button data
-   * @param {Function} callback - Callback function
    */
   async handleApplyClick(data, callback) {
     console.log('[ApplicationTracker] 📌 Processing apply click...');
@@ -123,7 +117,6 @@ export class ApplicationTracker {
     console.log(`[ApplicationTracker]   Redirect: ${data.applyData.redirectUrl}`);
 
     try {
-      // Create session
       const session = sessionManager.createSession(data.jobData, data.applyData);
 
       // Detect ATS and set strategy
@@ -135,10 +128,8 @@ export class ApplicationTracker {
       console.log(`[ApplicationTracker] ✅ Session created: ${session.sessionId}`);
       console.log(`[ApplicationTracker]   ATS detected: ${session.atsName}`);
 
-      // Store apply data for reference
       session.applyData = data.applyData;
 
-      // ✅ Initialize jobIds with LinkedIn job ID
       if (!session.jobIds) {
         session.jobIds = {};
       }
@@ -147,7 +138,6 @@ export class ApplicationTracker {
         console.log(`[ApplicationTracker] 🔑 LinkedIn Job ID: ${session.jobId}`);
       }
 
-      // ✅ Store the initial LinkedIn URL
       if (!session.visitedUrls) {
         session.visitedUrls = [];
       }
@@ -162,7 +152,7 @@ export class ApplicationTracker {
           title: data.jobData.title || 'LinkedIn Job',
           order: 1,
           label: this.getUrlLabel(sourceUrl),
-          jobId: jobId  // ✅ Store job ID with URL
+          jobId: jobId
         });
         console.log(`[ApplicationTracker] 📌 #1 [${this.getUrlLabel(sourceUrl)}]: ${sourceUrl}`);
         if (jobId) {
@@ -170,7 +160,6 @@ export class ApplicationTracker {
         }
       }
 
-      // ✅ Store the apply/redirect URL if different
       if (data.applyData.redirectUrl && data.applyData.redirectUrl !== sourceUrl) {
         const exists = session.visitedUrls.some(entry => entry.url === data.applyData.redirectUrl);
         if (!exists) {
@@ -183,7 +172,7 @@ export class ApplicationTracker {
             title: 'Apply Redirect',
             order: order,
             label: this.getUrlLabel(data.applyData.redirectUrl),
-            jobId: jobId  // ✅ Store job ID with URL
+            jobId: jobId
           });
           console.log(`[ApplicationTracker] 📌 #${order} [${this.getUrlLabel(data.applyData.redirectUrl)}]: ${data.applyData.redirectUrl}`);
           if (jobId) {
@@ -192,7 +181,6 @@ export class ApplicationTracker {
         }
       }
 
-      // Notify callback
       if (callback) {
         callback({ success: true, sessionId: session.sessionId });
       }
@@ -213,8 +201,7 @@ export class ApplicationTracker {
   // ============================================
 
   /**
-   * Handle tab created event - tracks ALL tabs in the flow
-   * @param {Object} event - The event
+   * Handle tab created event
    */
   async handleTabCreated(event) {
     console.log(`[ApplicationTracker] 📂 Tab created: ${event.tabId}`);
@@ -246,20 +233,18 @@ export class ApplicationTracker {
       }
     }
 
-    // 2. ✅ Check ALL active sessions
+    // 2. Check ALL active sessions
     const allSessions = sessionManager.getActiveSessions();
     console.log(`[ApplicationTracker]   Checking ${allSessions.length} active sessions`);
 
-    // Debug: Log all sessions
     for (const s of allSessions) {
       console.log(`[ApplicationTracker]   Session ${s.sessionId}: status=${s.status}, trackedTabs=${s.trackedTabs?.join(', ') || 'none'}`);
     }
 
-    // ✅ FIRST PASS: Try to find by opener tab ID (MOST RELIABLE)
+    // FIRST PASS: by opener tab ID
     for (const session of allSessions) {
       if (session.status === 'submitted' || session.status === 'abandoned') continue;
 
-      // ✅ Check if the opener tab is in this session's tracked tabs
       if (session.trackedTabs && session.trackedTabs.includes(event.openerTabId)) {
         console.log(`[ApplicationTracker] ✅✅ Tab ${event.tabId} opened from tracked tab ${event.openerTabId}`);
         console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
@@ -270,88 +255,44 @@ export class ApplicationTracker {
       }
     }
 
-    // ✅ SECOND PASS: Try by opener URL
-    try {
-      const openerTab = await chrome.tabs.get(event.openerTabId);
-      const openerUrl = openerTab.url || '';
-      console.log(`[ApplicationTracker]   Opener URL: ${openerUrl}`);
+    // SECOND PASS: by redirect tab ID
+    for (const session of allSessions) {
+      if (session.status === 'submitted' || session.status === 'abandoned') continue;
 
-      for (const session of allSessions) {
-        if (session.status === 'submitted' || session.status === 'abandoned') continue;
-
-        // Coinbase careers page
-        if (openerUrl.includes('coinbase.com') && openerUrl.includes('/careers/positions/')) {
-          if (session.redirectTabId === event.openerTabId) {
-            console.log(`[ApplicationTracker] ✅ Tab ${event.tabId} opened from Coinbase careers page`);
-            console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
-            console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
-            sessionManager.mapTabToSession(event.tabId, session.sessionId);
-            console.log(`[ApplicationTracker]   Mapped Greenhouse tab to session`);
-            return;
-          }
-        }
-
-        // Greenhouse embed
-        if (openerUrl.includes('greenhouse.io/embed/job_app')) {
-          if (session.redirectTabId === event.openerTabId) {
-            console.log(`[ApplicationTracker] ✅ Tab ${event.tabId} opened from Greenhouse embed`);
-            console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
-            console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
-            sessionManager.mapTabToSession(event.tabId, session.sessionId);
-            console.log(`[ApplicationTracker]   Mapped tab to session`);
-            return;
-          }
-        }
+      if (session.redirectTabId === event.openerTabId) {
+        console.log(`[ApplicationTracker] ✅ Tab ${event.tabId} opened from redirect tab ${event.openerTabId}`);
+        console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
+        console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
+        sessionManager.mapTabToSession(event.tabId, session.sessionId);
+        console.log(`[ApplicationTracker]   Mapped tab to session`);
+        return;
       }
-    } catch (e) {
-      console.log(`[ApplicationTracker]   Error getting opener: ${e.message}`);
     }
 
-    // ✅ THIRD PASS: Check if the new tab itself is a Greenhouse page
+    // THIRD PASS: new tab URL is itself a job page
     if (event.tab && event.tab.url) {
       const url = event.tab.url;
-      if (url.includes('greenhouse.io/embed/job_app') ||
-          url.includes('job-boards.greenhouse.io/embed/job_app')) {
-        console.log(`[ApplicationTracker] 🎯 New tab is Greenhouse page!`);
-        console.log(`[ApplicationTracker]   URL: ${url}`);
 
-        // Find the active session for this job
-        for (const session of allSessions) {
-          // Try to match by job ID
-          if (session.jobId === '4461237450' && session.status !== 'submitted') {
-            console.log(`[ApplicationTracker] ✅ Found session by job ID: ${session.sessionId}`);
-            sessionManager.mapTabToSession(event.tabId, session.sessionId);
-            console.log(`[ApplicationTracker]   Mapped Greenhouse tab to session`);
-            console.log(`[ApplicationTracker]   Tracked tabs: ${session.trackedTabs.join(', ')}`);
+      if (this.isJobPageFromUrl(url)) {
+        console.log(`[ApplicationTracker] 🎯 New tab is a job page: ${url}`);
 
-            // ✅ Immediately process the URL to check for confirmation
-            await this.processSessionUpdate(session, {
-              tabId: event.tabId,
-              url: url,
-              tab: event.tab
-            });
-            return;
-          }
+        const candidates = allSessions
+          .filter(s => s.status !== 'submitted' && s.status !== 'abandoned')
+          .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
 
-          // Also try by redirect tab ID (the Coinbase tab)
-          if (session.redirectTabId === event.openerTabId) {
-            console.log(`[ApplicationTracker] ✅ Found session by redirect tab: ${session.sessionId}`);
-            sessionManager.mapTabToSession(event.tabId, session.sessionId);
-            console.log(`[ApplicationTracker]   Mapped Greenhouse tab to session`);
-            console.log(`[ApplicationTracker]   Tracked tabs: ${session.trackedTabs.join(', ')}`);
-            return;
-          }
+        if (candidates.length > 0) {
+          const session = candidates[0];
+          console.log(`[ApplicationTracker] ✅ Mapping new job-page tab to most recent active session: ${session.sessionId}`);
+          sessionManager.mapTabToSession(event.tabId, session.sessionId);
+          console.log(`[ApplicationTracker]   Tracked tabs: ${session.trackedTabs.join(', ')}`);
+
+          await this.processSessionUpdate(session, {
+            tabId: event.tabId,
+            url: url,
+            tab: event.tab
+          });
+          return;
         }
-      }
-    }
-
-    // ✅ FOURTH PASS: Try to find by job ID (fallback)
-    for (const session of allSessions) {
-      if (session.jobId === '4461237450' && session.status !== 'submitted') {
-        console.log(`[ApplicationTracker] ✅ Found session by job ID: ${session.sessionId}`);
-        sessionManager.mapTabToSession(event.tabId, session.sessionId);
-        console.log(`[ApplicationTracker]   Mapped tab to session by job ID`);
-        return;
       }
     }
 
@@ -359,14 +300,11 @@ export class ApplicationTracker {
   }
 
   /**
-   * Handle tab updated event - detect URL changes in ANY tracked tab
-   * @param {Object} event - The event
+   * Handle tab updated event
    */
   async handleTabUpdated(event) {
-    // Skip if no session for this tab
     const session = sessionManager.getSessionByTabId(event.tabId);
     if (!session) {
-      // Check if this tab is tracked in any session
       const allSessions = sessionManager.getActiveSessions();
       for (const s of allSessions) {
         if (s.trackedTabs && s.trackedTabs.includes(event.tabId)) {
@@ -376,8 +314,27 @@ export class ApplicationTracker {
         }
       }
 
-      // ✅ NEW: Auto-create session if URL is a job page
       if (this.isJobPageFromUrl(event.url)) {
+        const existingSession = this.findSessionForUrl(event.url);
+
+        if (existingSession) {
+          console.log(`[ApplicationTracker] ♻️ Found existing session for URL: ${existingSession.sessionId}`);
+          console.log(`[ApplicationTracker]   Status: ${existingSession.status}`);
+
+          sessionManager.mapTabToSession(event.tabId, existingSession.sessionId);
+
+          if (existingSession.status === 'abandoned') {
+            console.log(`[ApplicationTracker] 🔄 Reactivating abandoned session`);
+            sessionManager.updateSession(existingSession.sessionId, {
+              status: 'in_progress',
+              lastActivityAt: Date.now()
+            });
+          }
+
+          await this.processSessionUpdate(existingSession, event);
+          return;
+        }
+
         console.log(`[ApplicationTracker] 🆕 Auto-creating session for job page: ${event.url}`);
         const newSession = this.createSessionFromUrl(event.url, event.tab);
 
@@ -391,19 +348,15 @@ export class ApplicationTracker {
       return;
     }
 
-    // Process the session update
     await this.processSessionUpdate(session, event);
   }
 
   /**
    * Process session update - handles ALL URL changes in tracked tabs
-   * @param {Object} session - The session
-   * @param {Object} event - The event
    */
   async processSessionUpdate(session, event) {
     if (!session) return;
 
-    // Skip if already completed
     if (session.status === 'submitted' || session.status === 'abandoned') {
       return;
     }
@@ -413,27 +366,29 @@ export class ApplicationTracker {
     console.log(`[ApplicationTracker]   Status: ${session.status}`);
     console.log(`[ApplicationTracker]   URL: ${event.url}`);
 
-    // ✅ Store the URL in the session
     if (!session.visitedUrls) {
       session.visitedUrls = [];
     }
 
-    // Check if this URL is already stored (avoid duplicates)
     const exists = session.visitedUrls.some(entry => entry.url === event.url);
     if (!exists && event.url) {
       const order = session.visitedUrls.length + 1;
-
-      // ✅ Extract job ID from URL
       const extractedJobId = this.extractJobIdFromUrl(event.url);
+
+      // Guard: tab.title is sometimes the URL before the page loads.
+      let pageTitle = event.tab?.title || null;
+      if (pageTitle && this.looksLikeUrl(pageTitle)) {
+        pageTitle = null;
+      }
 
       session.visitedUrls.push({
         url: event.url,
         timestamp: Date.now(),
         tabId: event.tabId,
-        title: event.tab?.title || null,
+        title: pageTitle,
         order: order,
         label: this.getUrlLabel(event.url),
-        jobId: extractedJobId  // ✅ Store job ID with URL
+        jobId: extractedJobId
       });
 
       console.log(`[ApplicationTracker] 📌 #${order} [${this.getUrlLabel(event.url)}]: ${event.url}`);
@@ -441,19 +396,16 @@ export class ApplicationTracker {
         console.log(`[ApplicationTracker]   🔑 Job ID: ${extractedJobId}`);
       }
 
-      // ✅ Store job ID in session.jobIds map
       if (extractedJobId) {
         if (!session.jobIds) {
           session.jobIds = {};
         }
         const source = this.detectJobIdSource(event.url);
-        // Only store if not already present
         if (!session.jobIds[source]) {
           session.jobIds[source] = extractedJobId;
           console.log(`[ApplicationTracker] 🔑 Added Job ID: ${source} = ${extractedJobId}`);
         }
 
-        // Update externalJobId if not set
         if (!session.externalJobId) {
           session.externalJobId = extractedJobId;
           console.log(`[ApplicationTracker] 🔑 External Job ID set: ${extractedJobId}`);
@@ -461,42 +413,53 @@ export class ApplicationTracker {
       }
     }
 
-    // Check if we have a strategy
-    if (!session.atsStrategy) {
+    // Re-evaluate strategy when current is generic and a specific one now matches.
+    // Example: LinkedIn safety redirect → Payoneer page with Greenhouse iframe.
+    const currentStrategyName = session.atsStrategy?.getAtsName?.() || 'generic';
+
+    if (!session.atsStrategy || currentStrategyName === 'generic') {
       const strategy = strategyFactory.getStrategy(event.url);
-      session.atsStrategy = strategy;
-      session.ats = strategy.getAtsName();
-      session.atsName = strategy.getDisplayName();
-      console.log(`[ApplicationTracker]   Strategy: ${session.atsName}`);
+      const newAtsName = strategy.getAtsName();
+
+      if (!session.atsStrategy || newAtsName !== currentStrategyName) {
+        console.log(`[ApplicationTracker]   Strategy updated: ${currentStrategyName} → ${newAtsName}`);
+        session.atsStrategy = strategy;
+        session.ats = newAtsName;
+        session.atsName = strategy.getDisplayName();
+      }
     }
 
-    // ✅ CRITICAL: Check for success page in ANY state
+    // CRITICAL: success page detection in ANY state
     if (session.atsStrategy && session.atsStrategy.isSuccessPage(event.url)) {
       console.log(`[ApplicationTracker] 🎉 SUCCESS PAGE DETECTED!`);
       console.log(`[ApplicationTracker]   URL: ${event.url}`);
       console.log(`[ApplicationTracker]   Session status before: ${session.status}`);
       console.log(`[ApplicationTracker]   Tab: ${event.tabId} (same tab, no new window)`);
 
-      // Extract thank you message
       const thankYouPhrase = session.atsStrategy.extractThankYouMessage(
         event.url,
         event.tab?.title || '',
         null
       );
 
-      // ✅ Add success URL to visited URLs if not already there
       const successExists = session.visitedUrls.some(entry => entry.url === event.url);
       if (!successExists && event.url) {
         const order = session.visitedUrls.length + 1;
         const extractedJobId = this.extractJobIdFromUrl(event.url);
+
+        let confirmTitle = event.tab?.title || null;
+        if (confirmTitle && this.looksLikeUrl(confirmTitle)) {
+          confirmTitle = null;
+        }
+
         session.visitedUrls.push({
           url: event.url,
           timestamp: Date.now(),
           tabId: event.tabId,
-          title: event.tab?.title || 'Application Confirmation',
+          title: confirmTitle || 'Application Confirmation',
           order: order,
           label: 'Application Confirmation',
-          jobId: extractedJobId  // ✅ Store job ID with confirmation URL
+          jobId: extractedJobId
         });
         console.log(`[ApplicationTracker] 🎉 Confirmation URL stored: ${event.url}`);
         if (extractedJobId) {
@@ -504,14 +467,12 @@ export class ApplicationTracker {
         }
       }
 
-      // ✅ Extract application reference from success page
       const applicationReference = this.extractApplicationIdFromUrl(event.url);
       if (applicationReference) {
         session.applicationReference = applicationReference;
         console.log(`[ApplicationTracker] 📋 Application Reference: ${applicationReference}`);
       }
 
-      // Update session to submitted
       sessionManager.updateSession(session.sessionId, {
         status: 'submitted',
         submittedAt: Date.now(),
@@ -520,7 +481,6 @@ export class ApplicationTracker {
         applicationReference: applicationReference || session.applicationReference
       });
 
-      // Transition to SubmittedState
       const submittedState = new STATES.submitted(session);
       if (session.currentState) {
         session.currentState.transitionTo(submittedState);
@@ -532,21 +492,17 @@ export class ApplicationTracker {
       console.log(`[ApplicationTracker] ✅ Session ${session.sessionId} marked as SUBMITTED!`);
       console.log(`[ApplicationTracker]   Tab: ${event.tabId} (same tab tracking works!) 🎉`);
 
-      // Dispatch submission event
       this.dispatchSubmissionEvent(session);
       return;
     }
 
-    // Process based on session state
     switch (session.status) {
       case 'redirecting':
         await this.handleRedirectingTab(session, event);
         break;
-
       case 'in_progress':
         await this.handleInProgressTab(session, event);
         break;
-
       default:
         break;
     }
@@ -554,12 +510,10 @@ export class ApplicationTracker {
 
   /**
    * Handle tab removed event
-   * @param {Object} event - The event
    */
   async handleTabRemoved(event) {
     const session = sessionManager.getSessionByTabId(event.tabId);
     if (!session) {
-      // Check if this tab is tracked in any session
       const allSessions = sessionManager.getActiveSessions();
       for (const s of allSessions) {
         if (s.trackedTabs && s.trackedTabs.includes(event.tabId)) {
@@ -567,7 +521,6 @@ export class ApplicationTracker {
           console.log(`[ApplicationTracker]   Session: ${s.sessionId}`);
           console.log(`[ApplicationTracker]   Job: ${s.jobTitle}`);
 
-          // If it's not the source tab or redirect tab, just remove from tracked tabs
           if (s.sourceTabId !== event.tabId && s.redirectTabId !== event.tabId) {
             const tabs = s.trackedTabs.filter(id => id !== event.tabId);
             s.trackedTabs = tabs;
@@ -577,7 +530,6 @@ export class ApplicationTracker {
             return;
           }
 
-          // If it's the redirect tab, transition to abandoned
           if (s.redirectTabId === event.tabId && s.status !== 'submitted') {
             console.log(`[ApplicationTracker] ❌ Redirect tab closed: ${event.tabId}`);
             const abandonReason = s.status === 'in_progress'
@@ -602,7 +554,6 @@ export class ApplicationTracker {
       return;
     }
 
-    // Skip if already completed
     if (session.status === 'submitted' || session.status === 'abandoned') {
       return;
     }
@@ -611,7 +562,6 @@ export class ApplicationTracker {
     console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
     console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
 
-    // Determine if it's a source tab or redirect tab
     const isSourceTab = session.sourceTabId === event.tabId;
     const isRedirectTab = session.redirectTabId === event.tabId;
 
@@ -648,11 +598,6 @@ export class ApplicationTracker {
   // STATE HANDLERS
   // ============================================
 
-  /**
-   * Handle tab in redirecting state
-   * @param {Object} session - The session
-   * @param {Object} event - The event
-   */
   async handleRedirectingTab(session, event) {
     console.log(`[ApplicationTracker] 🔄 Handling redirecting tab: ${session.sessionId}`);
     console.log(`[ApplicationTracker]   Tab: ${event.tabId}`);
@@ -661,7 +606,6 @@ export class ApplicationTracker {
     const strategy = session.atsStrategy;
     if (!strategy) return;
 
-    // Detect step from URL
     const stepResult = strategy.detectStep(event.url, event.tab?.title || '');
     console.log(`[ApplicationTracker]   Step detected: ${stepResult.step}`);
 
@@ -669,7 +613,6 @@ export class ApplicationTracker {
       console.log(`[ApplicationTracker] ✅ Step detected: ${stepResult.step}`);
       console.log(`[ApplicationTracker]   In same tab: ${event.tabId}`);
 
-      // Transition to InProgressState
       const inProgressState = new InProgressState(session);
       if (session.currentState) {
         session.currentState.transitionTo(inProgressState);
@@ -678,7 +621,6 @@ export class ApplicationTracker {
         session.currentState = inProgressState;
       }
 
-      // If step is 'success', immediately transition to SubmittedState
       if (stepResult.step === 'success') {
         console.log(`[ApplicationTracker] 🎉 Success step detected, transitioning to SubmittedState`);
         const submittedState = new STATES.submitted(session);
@@ -686,7 +628,6 @@ export class ApplicationTracker {
         return true;
       }
 
-      // Update session
       sessionManager.updateSession(session.sessionId, {
         status: 'in_progress',
         steps: [stepResult],
@@ -694,16 +635,10 @@ export class ApplicationTracker {
         lastActivityAt: Date.now()
       });
 
-      // Dispatch step detected event
       this.dispatchStepEvent(session, stepResult);
     }
   }
 
-  /**
-   * Handle tab in progress state
-   * @param {Object} session - The session
-   * @param {Object} event - The event
-   */
   async handleInProgressTab(session, event) {
     console.log(`[ApplicationTracker] 📝 Handling in-progress tab: ${session.sessionId}`);
     console.log(`[ApplicationTracker]   Tab: ${event.tabId}`);
@@ -712,7 +647,6 @@ export class ApplicationTracker {
     const strategy = session.atsStrategy;
     if (!strategy) return;
 
-    // Check if it's a success page
     if (strategy.isSuccessPage(event.url)) {
       console.log(`[ApplicationTracker] 🎉 Success page detected!`);
 
@@ -722,7 +656,6 @@ export class ApplicationTracker {
         null
       );
 
-      // ✅ Add success URL to visited URLs if not already there
       if (!session.visitedUrls) {
         session.visitedUrls = [];
       }
@@ -730,11 +663,17 @@ export class ApplicationTracker {
       if (!successExists && event.url) {
         const order = session.visitedUrls.length + 1;
         const extractedJobId = this.extractJobIdFromUrl(event.url);
+
+        let confirmTitle = event.tab?.title || null;
+        if (confirmTitle && this.looksLikeUrl(confirmTitle)) {
+          confirmTitle = null;
+        }
+
         session.visitedUrls.push({
           url: event.url,
           timestamp: Date.now(),
           tabId: event.tabId,
-          title: event.tab?.title || 'Application Confirmation',
+          title: confirmTitle || 'Application Confirmation',
           order: order,
           label: 'Application Confirmation',
           jobId: extractedJobId
@@ -745,7 +684,6 @@ export class ApplicationTracker {
         }
       }
 
-      // ✅ Extract application reference from success page
       const applicationReference = this.extractApplicationIdFromUrl(event.url);
       if (applicationReference) {
         session.applicationReference = applicationReference;
@@ -772,7 +710,6 @@ export class ApplicationTracker {
       return;
     }
 
-    // Detect step
     const stepResult = strategy.detectStep(event.url, event.tab?.title || '');
 
     if (stepResult.step !== 'unknown' && stepResult.step !== 'success') {
@@ -801,10 +738,6 @@ export class ApplicationTracker {
     }
   }
 
-  /**
-   * Handle session created event
-   * @param {Object} session - The session
-   */
   handleSessionCreated(session) {
     console.log(`[ApplicationTracker] 📌 Session created: ${session.sessionId}`);
     console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
@@ -814,10 +747,6 @@ export class ApplicationTracker {
     this.notifyCallbacks('session_created', session);
   }
 
-  /**
-   * Handle session update event
-   * @param {Object} session - The session
-   */
   handleSessionUpdate(session) {
     console.log(`[ApplicationTracker] 📝 Session updated: ${session.sessionId}`);
     console.log(`[ApplicationTracker]   Status: ${session.status}`);
@@ -828,11 +757,6 @@ export class ApplicationTracker {
     this.notifyCallbacks('session_updated', session);
   }
 
-  /**
-   * ✅ Handle content-based success detection (from iframe/modal)
-   * @param {Object} session - The session
-   * @param {Object} payload - Success payload
-   */
   handleSuccessDetected(session, payload) {
     console.log('[ApplicationTracker] 🎉 Content-based success for:', session.sessionId);
     console.log('[ApplicationTracker]   Phrase:', payload.phrase);
@@ -840,13 +764,11 @@ export class ApplicationTracker {
     console.log('[ApplicationTracker]   Method:', payload.detectionMethod || 'content');
     console.log('[ApplicationTracker]   From iframe:', payload.isIframe ? 'yes' : 'no');
 
-    // Skip if already submitted
     if (session.status === 'submitted') {
       console.log('[ApplicationTracker] Session already submitted, skipping');
       return;
     }
 
-    // Update session to submitted
     sessionManager.updateSession(session.sessionId, {
       status: 'submitted',
       submittedAt: Date.now(),
@@ -855,7 +777,6 @@ export class ApplicationTracker {
       successDetectionMethod: payload.detectionMethod || 'content'
     });
 
-    // Transition to SubmittedState
     const submittedState = new STATES.submitted(session);
     if (session.currentState) {
       session.currentState.transitionTo(submittedState);
@@ -866,30 +787,22 @@ export class ApplicationTracker {
 
     console.log(`[ApplicationTracker] ✅ Session ${session.sessionId} marked as SUBMITTED (content-based)!`);
 
-    // Dispatch submission event
     this.dispatchSubmissionEvent(session);
   }
 
   // ============================================
-  // ✅ AUTO-SESSION CREATION (NEW)
+  // AUTO-SESSION CREATION
   // ============================================
 
-  /**
-   * Check if URL is a job page (works without content script)
-   * @param {string} url - The URL to check
-   * @returns {boolean} True if it's a job page
-   */
   isJobPageFromUrl(url) {
     if (!url) return false;
 
     const urlLower = url.toLowerCase();
 
-    // ✅ Check for ATS query params (works on any domain)
     if (urlLower.includes('gh_jid=') || urlLower.includes('gh_src=')) {
-      return true;  // Greenhouse job on custom domain
+      return true;
     }
 
-    // ✅ Check for common ATS domains
     const patterns = [
       /greenhouse\.io/,
       /grnh\.se/,
@@ -909,12 +822,49 @@ export class ApplicationTracker {
     return patterns.some(p => p.test(urlLower));
   }
 
-  /**
-   * Create a session from a URL (for direct navigation)
-   * @param {string} url - The job page URL
-   * @param {Object} tab - The Chrome tab object
-   * @returns {Object|null} Created session or null
-   */
+  findSessionForUrl(url) {
+    if (!url) return null;
+
+    const normalize = (u) => {
+      try {
+        const parsed = new URL(u);
+        const keep = ['gh_jid', 'gh_src', 'jobId', 'job_id', 'currentJobId', 'token', 'jid'];
+        const params = new URLSearchParams();
+        for (const [k, v] of parsed.searchParams) {
+          if (keep.includes(k)) params.set(k, v);
+        }
+        const clean = new URL(parsed.origin + parsed.pathname);
+        const qs = params.toString();
+        if (qs) clean.search = qs;
+        return clean.toString().replace(/\/$/, '');
+      } catch {
+        return u;
+      }
+    };
+
+    const target = normalize(url);
+
+    const allSessions = sessionManager.getSessions({
+      includeCompleted: true,
+      includeAbandoned: true
+    });
+
+    for (const s of allSessions) {
+      const candidates = [s.jobUrl, s.redirectUrl, s.applyUrl];
+      if (s.visitedUrls) {
+        for (const v of s.visitedUrls) candidates.push(v.url);
+      }
+
+      for (const c of candidates) {
+        if (c && normalize(c) === target) {
+          return s;
+        }
+      }
+    }
+
+    return null;
+  }
+
   createSessionFromUrl(url, tab) {
     if (!url) return null;
 
@@ -924,16 +874,18 @@ export class ApplicationTracker {
       const company = hostname.split('.')[0];
       const companyName = company.charAt(0).toUpperCase() + company.slice(1);
 
-      // Detect ATS
       const strategy = strategyFactory.getStrategy(url);
       const atsName = strategy.getAtsName();
       const jobId = this.extractJobIdFromUrl(url);
 
-      // Create session
+      const rawTitle = tab?.title || '';
+      const titleIsUrl = this.looksLikeUrl(rawTitle);
+      const jobTitle = (!titleIsUrl && rawTitle) ? rawTitle : 'Unknown Job';
+
       const session = sessionManager.createSession(
         {
           externalJobId: jobId,
-          title: tab?.title || 'Unknown Job',
+          title: jobTitle,
           company: companyName,
           url: url
         },
@@ -945,12 +897,10 @@ export class ApplicationTracker {
         }
       );
 
-      // Set ATS
       session.ats = atsName;
       session.atsName = strategy.getDisplayName();
       session.atsStrategy = strategy;
 
-      // Job IDs
       if (!session.jobIds) session.jobIds = {};
       if (jobId) {
         const source = this.detectJobIdSource(url);
@@ -958,19 +908,17 @@ export class ApplicationTracker {
         session.externalJobId = jobId;
       }
 
-      // URL chain
       if (!session.visitedUrls) session.visitedUrls = [];
       session.visitedUrls.push({
         url: url,
         timestamp: Date.now(),
         tabId: tab?.id,
-        title: tab?.title,
+        title: titleIsUrl ? null : (tab?.title || null),
         order: 1,
         label: this.getUrlLabel(url),
         jobId: jobId
       });
 
-      // Map tab to session
       if (tab?.id) {
         sessionManager.mapTabToSession(tab.id, session.sessionId);
       }
@@ -992,11 +940,6 @@ export class ApplicationTracker {
   // EVENT DISPATCH
   // ============================================
 
-  /**
-   * Dispatch a step detected event
-   * @param {Object} session - The session
-   * @param {Object} stepResult - The step result
-   */
   dispatchStepEvent(session, stepResult) {
     const event = {
       type: 'STEP_DETECTED',
@@ -1014,10 +957,6 @@ export class ApplicationTracker {
     this.notifyCallbacks('step_detected', event);
   }
 
-  /**
-   * Dispatch a submission event
-   * @param {Object} session - The session
-   */
   dispatchSubmissionEvent(session) {
     const event = {
       type: 'APPLICATION_SUBMITTED',
@@ -1033,7 +972,6 @@ export class ApplicationTracker {
       submittedAt: session.submittedAt,
       totalTimeMs: session.submittedAt - session.startedAt,
       timestamp: Date.now(),
-      // ✅ Include job IDs in submission event
       jobIds: session.jobIds || {},
       externalJobId: session.externalJobId || null,
       applicationReference: session.applicationReference || null
@@ -1047,10 +985,6 @@ export class ApplicationTracker {
     this.notifyCallbacks('application_submitted', event);
   }
 
-  /**
-   * Dispatch an abandonment event
-   * @param {Object} session - The session
-   */
   dispatchAbandonmentEvent(session) {
     const event = {
       type: 'APPLICATION_ABANDONED',
@@ -1072,23 +1006,12 @@ export class ApplicationTracker {
   // CALLBACK MANAGEMENT
   // ============================================
 
-  /**
-   * Register a callback for application events
-   * @param {Function} callback - Callback function
-   * @param {string} eventType - Event type filter
-   * @returns {string} Callback ID
-   */
   onApplicationEvent(callback, eventType = null) {
     const id = `callback_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     this.submissionCallbacks.push({ id, callback, eventType });
     return id;
   }
 
-  /**
-   * Remove a callback
-   * @param {string} callbackId - Callback ID
-   * @returns {boolean} True if removed
-   */
   removeCallback(callbackId) {
     const index = this.submissionCallbacks.findIndex(c => c.id === callbackId);
     if (index > -1) {
@@ -1098,11 +1021,6 @@ export class ApplicationTracker {
     return false;
   }
 
-  /**
-   * Notify all callbacks
-   * @param {string} eventType - Event type
-   * @param {Object} data - Event data
-   */
   notifyCallbacks(eventType, data) {
     for (const { callback, eventType: filter } of this.submissionCallbacks) {
       if (filter && filter !== eventType) continue;
@@ -1119,10 +1037,29 @@ export class ApplicationTracker {
   // ============================================
 
   /**
-   * Extract job ID from various URL formats
-   * @param {string} url - The URL to extract from
-   * @returns {string|null} Extracted job ID or null
+   * Check if a string looks like a URL (with or without protocol).
+   * Used to guard against Chrome reporting tab.title as the URL
+   * before a page fully loads.
+   *
+   * @param {string} str
+   * @returns {boolean}
    */
+  looksLikeUrl(str) {
+    if (!str || typeof str !== 'string') return false;
+
+    // Has protocol
+    if (/^https?:\/\//i.test(str)) return true;
+    if (str.includes('://')) return true;
+
+    // Looks like a domain path: "example.com/..." or "sub.example.com/..."
+    if (/^[a-z0-9.-]+\.[a-z]{2,}\//i.test(str)) return true;
+
+    // Looks like a domain + query without path: "example.com?foo=bar"
+    if (/^[a-z0-9.-]+\.[a-z]{2,}\?/i.test(str)) return true;
+
+    return false;
+  }
+
   extractJobIdFromUrl(url) {
     if (!url) return null;
 
@@ -1130,112 +1067,36 @@ export class ApplicationTracker {
       const urlObj = new URL(url);
       const pathname = urlObj.pathname;
       const search = urlObj.search;
-      const hash = urlObj.hash;  // ✅ NEW — for RippleHire & hash-based URLs
+      const hash = urlObj.hash;
 
-      // ============================================
-      // 1. LinkedIn
-      // ============================================
-      // /jobs/view/12345
-      const linkedinViewMatch = pathname.match(/\/jobs\/view\/(\d+)/);
-      if (linkedinViewMatch) return linkedinViewMatch[1];
+      const queryParamMatch = search.match(
+        /[?&](?:job_?id|gh_jid|jid|posting_?id|position_?id|opening_?id|requisition_?id|req_?id)=([^&]+)/i
+      );
+      if (queryParamMatch && queryParamMatch[1]) {
+        return queryParamMatch[1];
+      }
 
-      // currentJobId=12345
-      const linkedinQueryMatch = search.match(/[?&]currentJobId=(\d+)/);
-      if (linkedinQueryMatch) return linkedinQueryMatch[1];
+      const uuidMatch = pathname.match(
+        /\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i
+      );
+      if (uuidMatch) return uuidMatch[1];
 
-      // ============================================
-      // 2. Coinbase
-      // ============================================
-      // /positions/12345
-      const coinbaseMatch = pathname.match(/\/positions\/(\d+)/);
-      if (coinbaseMatch) return coinbaseMatch[1];
+      const workdayMatch = pathname.match(/_([A-Z]{1,3}-?\d{4,})/);
+      if (workdayMatch) return workdayMatch[1];
 
-      // ============================================
-      // 3. Greenhouse
-      // ============================================
-      // token=12345
-      const greenhouseTokenMatch = search.match(/[?&]token=(\d+)/);
-      if (greenhouseTokenMatch) return greenhouseTokenMatch[1];
-
-      // gh_jid=12345
-      const greenhouseJidMatch = search.match(/[?&]gh_jid=(\d+)/);
-      if (greenhouseJidMatch) return greenhouseJidMatch[1];
-
-      // /jobs/12345
-      const greenhouseJobMatch = pathname.match(/\/jobs\/(\d+)/);
-      if (greenhouseJobMatch) return greenhouseJobMatch[1];
-
-      // /job_app?token=12345 (embed)
-      const greenhouseEmbedMatch = pathname.match(/\/job_app.*[?&]token=(\d+)/);
-      if (greenhouseEmbedMatch) return greenhouseEmbedMatch[1];
-
-      // ============================================
-      // 4. Lever
-      // ============================================
-      // /jobs/12345 or /jobs/job-id
-      const leverMatch = pathname.match(/\/jobs\/([^\/?]+)/);
-      if (leverMatch && !leverMatch[1].includes('.')) return leverMatch[1];
-
-      // jobId=12345
-      const leverQueryMatch = search.match(/[?&]jobId=([^&]+)/);
-      if (leverQueryMatch) return leverQueryMatch[1];
-
-      // ============================================
-      // 5. RippleHire (hash-based) ✅ NEW
-      // ============================================
-      // #apply/job/844714 or #detail/job/844714
       const ripplehireMatch = hash.match(/\/(?:apply|detail)\/job\/(\d+)/);
       if (ripplehireMatch) return ripplehireMatch[1];
 
-      // ============================================
-      // 6. Workday
-      // ============================================
-      // Nike URL: /job/Karnataka-India/Senior-Software-Engineer--ITC_R-86725/apply
-      // Pattern: _R-12345 or _JR-12345
-      const workdayMatch = pathname.match(/_([A-Z]+-?\d+)/);
-      if (workdayMatch) return workdayMatch[1];
+      const pathSegmentMatch = pathname.match(
+        /\/(?:jobs|job|positions|position|opening|openings|apply|posting|requisition|view)\/(\d{4,})(?:[/?#]|$)/i
+      );
+      if (pathSegmentMatch) return pathSegmentMatch[1];
 
-      // Fallback: /job/12345
-      const workdayJobMatch = pathname.match(/\/job\/(\d+)/);
-      if (workdayJobMatch) return workdayJobMatch[1];
+      const tokenMatch = search.match(/[?&]token=(\d{6,})/);
+      if (tokenMatch) return tokenMatch[1];
 
-      // Fallback: /job-12345
-      const workdayDashMatch = pathname.match(/\/job-(\d+)/);
-      if (workdayDashMatch) return workdayDashMatch[1];
-
-      // requisition=12345
-      const workdayRequisitionMatch = search.match(/[?&]requisition=(\d+)/);
-      if (workdayRequisitionMatch) return workdayRequisitionMatch[1];
-
-      // ============================================
-      // 7. Ashby
-      // ============================================
-      // UUID in path: jobs.ashbyhq.com/company/736024c0-15b1-4c75-82fd-7e1798f6ab79
-      const ashbyUuidMatch = pathname.match(/\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
-      if (ashbyUuidMatch) return ashbyUuidMatch[1];
-
-      // Fallback: /jobs/12345
-      const ashbyMatch = pathname.match(/\/jobs\/([^\/?]+)/);
-      if (ashbyMatch && !ashbyMatch[1].includes('.')) return ashbyMatch[1];
-
-      // jobId=12345
-      const ashbyQueryMatch = search.match(/[?&]jobId=([^&]+)/);
-      if (ashbyQueryMatch) return ashbyQueryMatch[1];
-
-      // ============================================
-      // 8. Generic
-      // ============================================
-      // job_id=12345, jobId=12345, id=12345
-      const genericJobIdMatch = search.match(/[?&](?:job_?id|jobId|jobid|id)=([^&]+)/i);
-      if (genericJobIdMatch) return genericJobIdMatch[1];
-
-      // /job/12345, /jobs/12345
-      const genericPathMatch = pathname.match(/\/jobs?\/(\d+)/);
-      if (genericPathMatch) return genericPathMatch[1];
-
-      // Hash fallback: #/job/12345, #/jobs/12345
-      const genericHashMatch = hash.match(/\/(?:job|jobs|position)\/([^\/?]+)/i);
-      if (genericHashMatch) return genericHashMatch[1];
+      const linkedinMatch = search.match(/[?&]currentJobId=(\d+)/);
+      if (linkedinMatch) return linkedinMatch[1];
 
       return null;
 
@@ -1245,40 +1106,42 @@ export class ApplicationTracker {
     }
   }
 
-  /**
-   * Detect the source of a job ID from URL
-   * @param {string} url - The URL to detect source from
-   * @returns {string} Source name (linkedin, coinbase, greenhouse, lever, workday, ashby, external)
-   */
   detectJobIdSource(url) {
     if (!url) return 'unknown';
 
-    const urlLower = url.toLowerCase();
+    try {
+      const urlObj = new URL(url);
+      const hostname = urlObj.hostname.replace('www.', '').toLowerCase();
 
-    if (urlLower.includes('linkedin.com')) return 'linkedin';
-    if (urlLower.includes('coinbase.com')) return 'coinbase';
-    if (urlLower.includes('greenhouse.io') || urlLower.includes('grnh.se') ||
-        urlLower.includes('boards.greenhouse.io') || urlLower.includes('job-boards.greenhouse.io')) {
-      return 'greenhouse';
+      if (hostname.includes('linkedin.com')) return 'linkedin';
+      if (hostname.includes('greenhouse.io') || hostname.includes('grnh.se')) return 'greenhouse';
+      if (hostname.includes('lever.co')) return 'lever';
+      if (hostname.includes('workday.com') || hostname.includes('myworkdayjobs.com')) return 'workday';
+      if (hostname.includes('ashbyhq.com') || hostname.includes('ashby.com')) return 'ashby';
+      if (hostname.includes('ripplehire.com')) return 'ripplehire';
+      if (hostname.includes('smartrecruiters.com')) return 'smartrecruiters';
+      if (hostname.includes('icims.com')) return 'icims';
+      if (hostname.includes('bamboohr.com')) return 'bamboohr';
+      if (hostname.includes('taleo.net')) return 'taleo';
+      if (hostname.includes('deel.com')) return 'deel';
+
+      if (url.includes('gh_jid=') || url.includes('gh_src=')) return 'greenhouse';
+
+      const parts = hostname.split('.');
+      if (parts.length >= 2) {
+        const skip = new Set(['www', 'jobs', 'careers', 'apply', 'job', 'boards', 'job-boards']);
+        const candidates = parts.filter(p => !skip.has(p));
+        if (candidates.length > 0) {
+          return candidates[0];
+        }
+      }
+
+      return 'external';
+    } catch (error) {
+      return 'external';
     }
-    if (urlLower.includes('lever.co') || urlLower.includes('jobs.lever.co')) return 'lever';
-    if (urlLower.includes('workday.com') || urlLower.includes('myworkdayjobs.com')) return 'workday';
-    if (urlLower.includes('ashbyhq.com') || urlLower.includes('ashby.com')) return 'ashby';
-    if (urlLower.includes('ripplehire.com')) return 'ripplehire';
-    if (urlLower.includes('smartrecruiters.com')) return 'smartrecruiters';
-    if (urlLower.includes('icims.com')) return 'icims';
-    if (urlLower.includes('bamboohr.com')) return 'bamboohr';
-    if (urlLower.includes('taleo.net')) return 'taleo';
-    if (urlLower.includes('deel.com') || urlLower.includes('jobs.deel')) return 'deel';
-
-    return 'external';
   }
 
-  /**
-   * Extract application reference/confirmation ID from URL
-   * @param {string} url - The success page URL
-   * @returns {string|null} Application reference or null
-   */
   extractApplicationIdFromUrl(url) {
     if (!url) return null;
 
@@ -1288,34 +1151,18 @@ export class ApplicationTracker {
       const pathname = urlObj.pathname;
       const hash = urlObj.hash;
 
-      // ============================================
-      // 1. Greenhouse: token=12345
-      // ============================================
       const tokenMatch = search.match(/[?&]token=(\d+)/);
       if (tokenMatch) return tokenMatch[1];
 
-      // ============================================
-      // 2. RippleHire (hash-based) ✅ NEW
-      // ============================================
-      // #apply/job/844714 or #detail/job/844714
       const ripplehireMatch = hash.match(/\/(?:apply|detail)\/job\/(\d+)/);
       if (ripplehireMatch) return ripplehireMatch[1];
 
-      // ============================================
-      // 3. Generic: applicationId=xxx, confirmation=xxx, reference=xxx
-      // ============================================
       const appIdMatch = search.match(/[?&](?:applicationId|confirmation|reference|application_id)=([^&]+)/i);
       if (appIdMatch) return appIdMatch[1];
 
-      // ============================================
-      // 4. Path-based: /confirmation/12345
-      // ============================================
       const pathMatch = pathname.match(/\/confirmation\/([^\/?]+)/);
       if (pathMatch) return pathMatch[1];
 
-      // ============================================
-      // 5. Hash-based generic: #confirmation/12345
-      // ============================================
       const hashConfirmMatch = hash.match(/\/(?:confirmation|success|thank-you)\/([^\/?]+)/i);
       if (hashConfirmMatch) return hashConfirmMatch[1];
 
@@ -1327,11 +1174,6 @@ export class ApplicationTracker {
     }
   }
 
-  /**
-   * Get a descriptive label for a URL - Uses strategies for dynamic detection
-   * @param {string} url - The URL to label
-   * @returns {string} Human-readable label
-   */
   getUrlLabel(url) {
     if (!url) return 'Unknown';
 
@@ -1340,20 +1182,15 @@ export class ApplicationTracker {
       const hostname = urlObj.hostname.toLowerCase();
       const pathname = urlObj.pathname.toLowerCase();
 
-      // ============================================
-      // 1. Try using the strategy factory first
-      // ============================================
       try {
         const strategy = strategyFactory.getStrategy(url);
         const atsName = strategy.getDisplayName();
 
         if (strategy && strategy.getAtsName() !== 'generic') {
-          // Check if it's a success/confirmation page
           if (strategy.isSuccessPage(url)) {
             return `${atsName} Confirmation`;
           }
 
-          // Check if it's an application form
           if (pathname.includes('apply') ||
               pathname.includes('application') ||
               pathname.includes('embed/job_app') ||
@@ -1364,15 +1201,9 @@ export class ApplicationTracker {
           return atsName;
         }
       } catch (strategyError) {
-        // Strategy failed, fall back to domain detection
         console.debug('[ApplicationTracker] Strategy detection failed, using fallback:', strategyError.message);
       }
 
-      // ============================================
-      // 2. FALLBACK: Domain-based detection
-      // ============================================
-
-      // LinkedIn
       if (hostname.includes('linkedin.com')) {
         if (pathname.includes('/jobs/search-results')) return 'LinkedIn Job Search';
         if (pathname.includes('/jobs/view')) return 'LinkedIn Job Detail';
@@ -1381,31 +1212,25 @@ export class ApplicationTracker {
         return 'LinkedIn';
       }
 
-      // Naukri
       if (hostname.includes('naukri.com')) {
         if (pathname.includes('/job-listings')) return 'Naukri Job Listing';
         if (pathname.includes('/job-details')) return 'Naukri Job Detail';
         return 'Naukri';
       }
 
-      // Greenhouse (any greenhouse domain)
       if (hostname.includes('greenhouse.io') ||
           hostname.includes('grnh.se') ||
           hostname.includes('boards.greenhouse.io') ||
           hostname.includes('job-boards.greenhouse.io')) {
-        if (pathname.includes('confirmation') ||
-            pathname.includes('thank-you')) {
+        if (pathname.includes('confirmation') || pathname.includes('thank-you')) {
           return 'Greenhouse Confirmation';
         }
-        if (pathname.includes('job_app') ||
-            pathname.includes('apply') ||
-            pathname.includes('application')) {
+        if (pathname.includes('job_app') || pathname.includes('apply') || pathname.includes('application')) {
           return 'Greenhouse Application';
         }
         return 'Greenhouse';
       }
 
-      // Lever
       if (hostname.includes('lever.co') || hostname.includes('jobs.lever.co')) {
         if (pathname.includes('thank-you') || pathname.includes('confirmation')) {
           return 'Lever Confirmation';
@@ -1416,7 +1241,6 @@ export class ApplicationTracker {
         return 'Lever';
       }
 
-      // Workday
       if (hostname.includes('workday.com') || hostname.includes('myworkdayjobs.com')) {
         if (pathname.includes('thank-you') ||
             pathname.includes('confirmation') ||
@@ -1429,7 +1253,6 @@ export class ApplicationTracker {
         return 'Workday';
       }
 
-      // Ashby
       if (hostname.includes('ashby.com')) {
         if (pathname.includes('thank-you') || pathname.includes('confirmation')) {
           return 'Ashby Confirmation';
@@ -1440,9 +1263,6 @@ export class ApplicationTracker {
         return 'Ashby';
       }
 
-      // ============================================
-      // 3. COMPANY CAREER PAGES
-      // ============================================
       if (pathname.includes('/careers') ||
           pathname.includes('/jobs') ||
           pathname.includes('/career') ||
@@ -1457,9 +1277,6 @@ export class ApplicationTracker {
         return 'Company Careers';
       }
 
-      // ============================================
-      // 4. DEFAULT: Extract domain
-      // ============================================
       const domain = hostname.replace('www.', '').split('.')[0];
       if (domain && domain.length > 0 && !domain.includes('google') && !domain.includes('chrome')) {
         return domain.charAt(0).toUpperCase() + domain.slice(1);
@@ -1473,18 +1290,10 @@ export class ApplicationTracker {
     }
   }
 
-  /**
-   * Get active sessions
-   * @returns {Object[]} Array of active sessions
-   */
   getActiveSessions() {
     return sessionManager.getActiveSessions();
   }
 
-  /**
-   * Get session statistics
-   * @returns {Object} Statistics
-   */
   getStats() {
     const sessionStats = sessionManager.getStats();
     return {
@@ -1495,9 +1304,6 @@ export class ApplicationTracker {
     };
   }
 
-  /**
-   * Clean up and destroy the tracker
-   */
   destroy() {
     console.log('[ApplicationTracker] Destroying...');
 
@@ -1513,10 +1319,6 @@ export class ApplicationTracker {
     console.log('[ApplicationTracker] ✅ Destroyed');
   }
 
-  /**
-   * Get the status of the tracker
-   * @returns {Object} Status object
-   */
   getStatus() {
     return {
       isInitialized: this.isInitialized,
@@ -1529,6 +1331,5 @@ export class ApplicationTracker {
   }
 }
 
-// Export singleton instance
 const applicationTracker = new ApplicationTracker();
 export default applicationTracker;
