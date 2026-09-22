@@ -120,45 +120,6 @@ export class APIClient {
     }
   }
 
-  // ============================================
-  // JOB TRACKING
-  // ============================================
-
-  async trackJob(job) {
-    try {
-      return await this.request('/jobs/track', {
-        method: 'POST',
-        body: JSON.stringify(job)
-      });
-    } catch (error) {
-      console.error('[API] Track job error:', error);
-      throw error;
-    }
-  }
-
-  async checkJobStatus(job) {
-    try {
-      return await this.request('/jobs/status', {
-        method: 'POST',
-        body: JSON.stringify({
-          url: job.url,
-          fingerprint: job.fingerprint
-        })
-      });
-    } catch (error) {
-      console.error('[API] Check job status error:', error);
-      throw error;
-    }
-  }
-
-  async getTrackedJobs(page = 1, limit = 20) {
-    try {
-      return await this.request(`/jobs/tracked?page=${page}&limit=${limit}`);
-    } catch (error) {
-      console.error('[API] Get tracked jobs error:', error);
-      throw error;
-    }
-  }
 
   // ============================================
   // CONFIGURATION

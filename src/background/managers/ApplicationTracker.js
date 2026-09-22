@@ -217,6 +217,7 @@ export class ApplicationTracker {
       if (session) {
         console.log(`[ApplicationTracker] ✅ Found session for tab: ${session.sessionId}`);
         sessionManager.mapTabToSession(event.tabId, session.sessionId);
+        await this._pushTabUrlToSession(session, event.tabId);
 
         const updated = sessionManager.updateSession(session.sessionId, {
           status: 'redirecting',
@@ -250,6 +251,7 @@ export class ApplicationTracker {
         console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
         console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
         sessionManager.mapTabToSession(event.tabId, session.sessionId);
+        await this._pushTabUrlToSession(session, event.tabId);
         console.log(`[ApplicationTracker]   Tracked tabs: ${session.trackedTabs.join(', ')}`);
         return;
       }
@@ -264,6 +266,7 @@ export class ApplicationTracker {
         console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
         console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
         sessionManager.mapTabToSession(event.tabId, session.sessionId);
+        await this._pushTabUrlToSession(session, event.tabId);
         console.log(`[ApplicationTracker]   Mapped tab to session`);
         return;
       }
@@ -297,6 +300,61 @@ export class ApplicationTracker {
     }
 
     console.log(`[ApplicationTracker] ⚠️ No session found for tab ${event.tabId}`);
+  }
+
+  /**
+   * Fetch a tab's current URL and push it into the session's
+   * visitedUrls if not already present.
+   *
+   * Called right after mapping a tab to a session. The TAB_CREATED
+   * event fires before the tab has navigated, so we have to look up
+   * the tab again to get its current URL.
+   *
+   * @param {Object} session - The session to push into
+   * @param {number} tabId   - The tab whose URL to record
+   */
+  async _pushTabUrlToSession(session, tabId) {
+    if (!session || !tabId) return;
+
+    let tabInfo = null;
+    try {
+      tabInfo = await chrome.tabs.get(tabId);
+    } catch (e) {
+      // Tab may have been closed already
+      return;
+    }
+
+    const currentUrl = tabInfo?.url;
+    if (!currentUrl) return;
+
+    if (!session.visitedUrls) session.visitedUrls = [];
+
+    const exists = session.visitedUrls.some(entry => entry.url === currentUrl);
+    if (exists) return;
+
+    const order = session.visitedUrls.length + 1;
+    const jobId = this.extractJobIdFromUrl(currentUrl);
+    const label = this.getUrlLabel(currentUrl);
+
+    let title = tabInfo.title || null;
+    if (title && this.looksLikeUrl(title)) {
+      title = null;
+    }
+
+    session.visitedUrls.push({
+      url: currentUrl,
+      timestamp: Date.now(),
+      tabId,
+      title,
+      order,
+      label,
+      jobId
+    });
+
+    console.log(`[ApplicationTracker] 📌 #${order} [${label}]: ${currentUrl}`);
+    if (jobId) {
+      console.log(`[ApplicationTracker]   🔑 Job ID: ${jobId}`);
+    }
   }
 
   /**

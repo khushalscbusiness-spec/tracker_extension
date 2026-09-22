@@ -230,7 +230,6 @@ class ServiceWorker {
 
       if (response && response.job) {
         await this.stateManager.setJob(response.job);
-        await this.checkJobStatus(response.job);
         this.broadcastStateUpdate();
       }
     } catch (error) {
@@ -263,21 +262,6 @@ class ServiceWorker {
   }
 
   // ============================================
-  // JOB STATUS
-  // ============================================
-
-  async checkJobStatus(job) {
-    if (!this.apiClient.isAuthenticated()) return;
-
-    try {
-      const status = await this.apiClient.checkJobStatus(job);
-      await this.stateManager.setJobStatus(status);
-    } catch (error) {
-      console.error('[JobPulse] Error checking job status:', error);
-    }
-  }
-
-  // ============================================
   // MESSAGE HANDLING
   // ============================================
 
@@ -287,7 +271,6 @@ class ServiceWorker {
     switch (message.type) {
       case 'JOB_DETECTED':
         await this.stateManager.setJob(message.payload);
-        await this.checkJobStatus(message.payload);
         this.broadcastStateUpdate();
         sendResponse({ success: true });
         break;
@@ -317,11 +300,6 @@ class ServiceWorker {
         sendResponse({ success: true });
         break;
 
-      case 'TRACK_JOB':
-        const trackResult = await this.handleTrackJob(message.job);
-        sendResponse(trackResult);
-        break;
-
       case 'CHECK_AUTH':
         try {
           const auth = await this.checkAuth();
@@ -330,6 +308,32 @@ class ServiceWorker {
           sendResponse({ authenticated: false, error: error.message });
         }
         break;
+
+      case 'GET_SESSION_FOR_TAB': {
+        const tabId = message.tabId;
+        let session = sessionManager.getSessionByTabId(tabId);
+
+        if (!session) {
+          const active = sessionManager.getActiveSessions();
+          session = active
+            .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))[0] || null;
+        }
+
+        sendResponse({
+          session: session ? {
+            sessionId: session.sessionId,
+            status: session.status,
+            stepLabel: session.steps?.length
+              ? session.steps[session.steps.length - 1].label
+              : null,
+            urlCount: session.visitedUrls?.length || 0,
+            elapsedMs: session.startedAt ? Date.now() - session.startedAt : 0,
+            atsName: session.atsName || null,
+            platform: session.platform || null
+          } : null
+        });
+        break;
+      }
 
       default:
         sendResponse({ error: 'Unknown message type' });
@@ -498,35 +502,6 @@ class ServiceWorker {
   }
 
   // ============================================
-  // JOB TRACKING
-  // ============================================
-
-  async handleTrackJob(job) {
-    if (!this.apiClient.isAuthenticated()) {
-      return { success: false, error: 'NOT_AUTHENTICATED' };
-    }
-
-    try {
-      const response = await this.apiClient.trackJob(job);
-      await this.stateManager.setJobStatus({
-        tracked: true,
-        duplicate: response.duplicate,
-        jobId: response.id,
-        status: response.status || 'Saved',
-        trackedAt: new Date().toISOString()
-      });
-      this.broadcastStateUpdate();
-      return { success: true, ...response };
-    } catch (error) {
-      console.error('[JobPulse] Track job error:', error);
-      return {
-        success: false,
-        error: error.message || 'Failed to track job'
-      };
-    }
-  }
-
-  // ============================================
   // AUTHENTICATION
   // ============================================
 
@@ -555,11 +530,6 @@ class ServiceWorker {
     console.log('[JobPulse] Popup message:', message.type);
 
     switch (message.type) {
-      case 'TRACK_JOB':
-        const result = await this.handleTrackJob(message.job);
-        port.postMessage({ type: 'TRACK_RESULT', ...result });
-        break;
-
       case 'GET_STATE':
         const state = await this.stateManager.getState();
         port.postMessage({ type: 'STATE_UPDATE', state });

@@ -7,10 +7,16 @@ class Popup {
     this.state = {
       job: null,
       status: null,
+      session: null,
       authenticated: false,
       user: null
     };
     this.elements = {};
+
+    // Interval that re-renders the elapsed time every second while a
+    // session is active. Cleared when no session is present.
+    this.elapsedTimer = null;
+
     this.initialize();
   }
 
@@ -21,6 +27,7 @@ class Popup {
     await this.connectToBackground();
     await this.checkAuth();
     await this.getCurrentState();
+    await this.refreshSessionStatus();
   }
 
   cacheElements() {
@@ -35,13 +42,13 @@ class Popup {
       jobLocation: document.getElementById('jobLocation'),
       jobPlatform: document.getElementById('jobPlatform'),
 
-      trackBtn: document.getElementById('trackBtn'),
+      sessionStatus: document.getElementById('sessionStatus'),
+      sessionStateBadge: document.getElementById('sessionStateBadge'),
+      sessionStep: document.getElementById('sessionStep'),
+      sessionUrlCount: document.getElementById('sessionUrlCount'),
+      sessionElapsed: document.getElementById('sessionElapsed'),
+
       logoutBtn: document.getElementById('logoutBtn'),
-
-      trackedStatus: document.getElementById('trackedStatus'),
-      applicationStatus: document.getElementById('applicationStatus'),
-      trackedDate: document.getElementById('trackedDate'),
-
       errorMessage: document.getElementById('errorMessage'),
 
       loginForm: document.getElementById('loginForm'),
@@ -75,11 +82,6 @@ class Popup {
   }
 
   setupEventListeners() {
-    // Track button
-    this.elements.trackBtn.addEventListener('click', () => {
-      this.handleTrackJob();
-    });
-
     // Logout button
     this.elements.logoutBtn.addEventListener('click', () => {
       this.handleLogout();
@@ -123,8 +125,8 @@ class Popup {
         this.updateState(message.state);
         break;
 
-      case 'TRACK_RESULT':
-        this.handleTrackResult(message);
+      case 'SESSION_UPDATE':
+        this.updateSession(message.session);
         break;
 
       case 'LOGIN_SUCCESS':
@@ -166,12 +168,42 @@ class Popup {
     }
   }
 
+  /**
+   * Ask the service worker for the session associated with the
+   * currently-active tab. The SW falls back to the most recent
+   * active session if the tab isn't mapped to one.
+   */
+  async refreshSessionStatus() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab) {
+        this.updateSession(null);
+        return;
+      }
+
+      const response = await chrome.runtime.sendMessage({
+        type: 'GET_SESSION_FOR_TAB',
+        tabId: tab.id
+      });
+
+      this.updateSession(response?.session || null);
+    } catch (error) {
+      console.error('[Popup] Refresh session error:', error);
+      this.updateSession(null);
+    }
+  }
+
   updateState(state) {
     if (state) {
       this.state.job = state.job || null;
       this.state.status = state.status || null;
     }
     this.render();
+  }
+
+  updateSession(session) {
+    this.state.session = session || null;
+    this.renderSessionStatus();
   }
 
   render() {
@@ -225,21 +257,11 @@ class Popup {
     this.elements.jobLocation.textContent = job.location || 'Location not specified';
     this.elements.jobPlatform.textContent = job.platform?.toUpperCase() || 'UNKNOWN';
 
-    // Show tracked status if already tracked
-    if (this.state.status?.tracked) {
-      this.elements.trackedStatus.style.display = 'block';
-      this.elements.applicationStatus.textContent = this.state.status.status || 'Saved';
-      this.elements.trackedDate.textContent = this.formatDate(this.state.status.trackedAt);
-      this.elements.trackBtn.textContent = '✓ Already Tracked';
-      this.elements.trackBtn.disabled = true;
-    } else {
-      this.elements.trackedStatus.style.display = 'none';
-      this.elements.trackBtn.textContent = '📌 Track Job';
-      this.elements.trackBtn.disabled = false;
-    }
-
     this.elements.errorMessage.style.display = 'none';
     this.elements.logoutBtn.style.display = 'block';
+
+    // Session status (read-only)
+    this.renderSessionStatus();
   }
 
   hideAllStates() {
@@ -249,44 +271,98 @@ class Popup {
     this.elements.loginState.style.display = 'none';
   }
 
-  handleTrackJob() {
-    if (!this.state.job) return;
+  /**
+   * Render the read-only session block.
+   *
+   * Shows:
+   *   - State badge ("Tracking", "Redirecting", "Submitted", ...)
+   *   - Last detected step
+   *   - Number of URLs in the visit chain
+   *   - Elapsed time since the session started
+   *
+   * If there's no active session, hides the block.
+   */
+  renderSessionStatus() {
+    const session = this.state.session;
 
-    this.elements.trackBtn.disabled = true;
-    this.elements.trackBtn.textContent = 'Tracking...';
-    this.elements.errorMessage.style.display = 'none';
+    if (!session || !this.elements.sessionStatus) {
+      if (this.elements.sessionStatus) {
+        this.elements.sessionStatus.style.display = 'none';
+      }
+      this.stopElapsedTimer();
+      return;
+    }
 
-    this.port.postMessage({
-      type: 'TRACK_JOB',
-      job: this.state.job
-    });
+    this.elements.sessionStatus.style.display = 'block';
+
+    // Map internal status → display label
+    const labels = {
+      initiated: 'Initiated',
+      redirecting: 'Redirecting',
+      in_progress: 'In progress',
+      submitted: 'Submitted',
+      abandoned: 'Abandoned'
+    };
+    this.elements.sessionStateBadge.textContent =
+      labels[session.status] || session.status || 'Unknown';
+
+    // Step
+    this.elements.sessionStep.textContent = session.stepLabel || '—';
+
+    // URL count
+    this.elements.sessionUrlCount.textContent = String(session.urlCount || 0);
+
+    // Elapsed time
+    this.renderElapsed(session);
+
+    // Keep the elapsed label ticking while the session is active
+    if (session.status !== 'submitted' && session.status !== 'abandoned') {
+      this.startElapsedTimer();
+    } else {
+      this.stopElapsedTimer();
+    }
   }
 
-  handleTrackResult(result) {
-    this.elements.trackBtn.disabled = false;
+  renderElapsed(session) {
+    if (!session || typeof session.elapsedMs !== 'number') {
+      this.elements.sessionElapsed.textContent = '0s';
+      return;
+    }
 
-    if (result.success) {
-      this.state.status = {
-        tracked: true,
-        duplicate: result.duplicate,
-        jobId: result.id,
-        status: 'Saved',
-        trackedAt: new Date().toISOString()
-      };
+    // Recompute locally so the timer can tick without re-querying
+    const startedAt = Date.now() - session.elapsedMs;
+    const diffMs = Date.now() - startedAt;
+    const diffSec = Math.floor(diffMs / 1000);
 
-      this.elements.trackedStatus.style.display = 'block';
-      this.elements.applicationStatus.textContent = 'Saved';
-      this.elements.trackedDate.textContent = 'Just now';
-      this.elements.trackBtn.textContent = '✓ Tracked';
-      this.elements.trackBtn.disabled = true;
+    if (diffSec < 60) {
+      this.elements.sessionElapsed.textContent = `${diffSec}s`;
     } else {
-      if (result.error === 'NOT_AUTHENTICATED') {
-        this.showLogin();
-      } else {
-        this.showError(result.error || 'Failed to track job');
-        this.elements.trackBtn.textContent = '📌 Try Again';
-        this.elements.trackBtn.disabled = false;
+      const mins = Math.floor(diffSec / 60);
+      const secs = diffSec % 60;
+      this.elements.sessionElapsed.textContent = `${mins}m ${secs}s`;
+    }
+  }
+
+  startElapsedTimer() {
+    if (this.elapsedTimer) return;
+
+    this.elapsedTimer = setInterval(() => {
+      const session = this.state.session;
+      if (!session || session.status === 'submitted' || session.status === 'abandoned') {
+        this.stopElapsedTimer();
+        return;
       }
+
+      // Bump elapsedMs locally so renderElapsed keeps counting
+      session.elapsedMs = (session.elapsedMs || 0) + 1000;
+      this.renderElapsed(session);
+    }, 1000);
+  }
+
+  stopElapsedTimer() {
+    if (this.elapsedTimer) {
+      clearInterval(this.elapsedTimer);
+      this.elapsedTimer = null;
     }
   }
 
@@ -317,6 +393,7 @@ class Popup {
     this.elements.loginError.style.display = 'none';
     this.elements.logoutBtn.style.display = 'block';
     this.getCurrentState();
+    this.refreshSessionStatus();
   }
 
   handleLoginError(error) {
@@ -339,7 +416,9 @@ class Popup {
     this.state.user = null;
     this.state.job = null;
     this.state.status = null;
+    this.state.session = null;
     this.elements.logoutBtn.style.display = 'none';
+    this.stopElapsedTimer();
     this.showLogin();
   }
 
@@ -348,34 +427,14 @@ class Popup {
     this.elements.errorMessage.style.display = 'block';
   }
 
-  formatDate(dateStr) {
-    if (!dateStr) return 'Today';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diff = now - date;
-
-    if (diff < 60000) return 'Just now';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)} minutes ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)} hours ago`;
-    if (diff < 604800000) return `${Math.floor(diff / 86400000)} days ago`;
-
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric'
-    });
-  }
-
   openDashboard() {
-    // Open dashboard in new tab
-    // Replace with actual dashboard URL
-    chrome.tabs.create({ url: 'https://app.jobpulse.com/dashboard' });
+    // Open the Layer 3 frontend dashboard
+    chrome.tabs.create({ url: 'http://localhost:3000/dashboard' });
   }
 
   openSignup() {
-    // Open signup in new tab
-    // Replace with actual signup URL
-    chrome.tabs.create({ url: 'https://app.jobpulse.com/signup' });
+    // Open the Layer 3 frontend signup page
+    chrome.tabs.create({ url: 'http://localhost:3000/signup' });
   }
 }
 

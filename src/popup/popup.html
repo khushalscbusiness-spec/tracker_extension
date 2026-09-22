@@ -39,13 +39,13 @@
                     <span id="jobPlatform" class="job-platform">LinkedIn</span>
                 </div>
 
-                <div id="trackedStatus" style="display: none;" class="tracked-status">
-                    <span class="status-badge">✓ Already Tracked</span>
-                    <p class="status-detail">Status: <span id="applicationStatus">Saved</span></p>
-                    <p class="status-detail">Tracked: <span id="trackedDate">Today</span></p>
+                <!-- Session status (read-only) -->
+                <div id="sessionStatus" class="session-status" style="display: none;">
+                    <span class="status-badge" id="sessionStateBadge">Tracking</span>
+                    <p class="status-detail">Step: <span id="sessionStep">—</span></p>
+                    <p class="status-detail">URLs tracked: <span id="sessionUrlCount">0</span></p>
+                    <p class="status-detail">Elapsed: <span id="sessionElapsed">0s</span></p>
                 </div>
-
-                <button id="trackBtn" class="track-btn">📌 Track Job</button>
 
                 <div id="errorMessage" class="error-message" style="display: none;"></div>
             </div>
