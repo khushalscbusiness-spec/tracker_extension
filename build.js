@@ -45,7 +45,6 @@ const envAliasPlugin = {
   name: 'env-alias',
   setup(build) {
     build.onResolve({ filter: /\/env\/active\.js$/ }, (args) => {
-      // Replace 'active.js' with the real env file, then resolve to an absolute path
       const replaced = args.path.replace(/\/env\/active\.js$/, `/env/${activeEnvFile}`);
       const absolutePath = path.resolve(args.resolveDir, replaced);
       return { path: absolutePath, external: false };
@@ -93,6 +92,24 @@ const serviceWorkerBuildOptions = {
   }
 };
 
+// Popup — ESM (loaded via <script type="module"> in popup.html)
+const popupBuildOptions = {
+  entryPoints: ['src/popup/popup.js'],
+  bundle: true,
+  outfile: 'dist/src/popup/popup.js',
+  format: 'esm',
+  platform: 'browser',
+  target: ['chrome90'],
+  minify: isProduction,
+  sourcemap: !isProduction,
+  logLevel: 'info',
+  external: ['chrome'],
+  plugins: [envAliasPlugin],
+  define: {
+    BUILD_ENV: JSON.stringify(BUILD_ENV)
+  }
+};
+
 // ============================================
 // BUILD
 // ============================================
@@ -102,23 +119,36 @@ if (isWatch) {
 
   const contentCtx = await esbuild.context(contentBuildOptions);
   const swCtx = await esbuild.context(serviceWorkerBuildOptions);
+  const popupCtx = await esbuild.context(popupBuildOptions);
+
   await contentCtx.watch();
   await swCtx.watch();
+  await popupCtx.watch();
 
   console.log('✅ Watching — source files are never mutated');
 } else {
-  // 1. Content script
+  // IMPORTANT: copyFiles() runs FIRST so that bundle outputs are not
+  // overwritten by the raw copied sources.
+  //
+  // Order:
+  //   1. Copy static files (html, css, api/, state/, utils/, icons, manifest)
+  //   2. Bundle entry points on top — these overwrite their copied sources
+  //      (only popup.js overlaps; content/ and background/ aren't copied)
+  copyFiles();
+
+  // 2. Content script
   await esbuild.build(contentBuildOptions);
   console.log('✅ Content scripts bundled!');
 
-  // 2. Service worker
+  // 3. Service worker
   await esbuild.build(serviceWorkerBuildOptions);
   console.log('✅ Service worker bundled!');
 
-  // 3. Static files
-  copyFiles();
+  // 4. Popup
+  await esbuild.build(popupBuildOptions);
+  console.log('✅ Popup bundled!');
 
-  // 4. Post-build sanity check
+  // 5. Post-build sanity check
   verifyNoDevUrlsInProd();
 }
 
@@ -150,10 +180,14 @@ function copyFiles() {
     fs.cpSync('icons', 'dist/icons', { recursive: true });
   }
 
-  // Copy src files
-  // NOTE: `background` is excluded — the service worker is bundled, not copied.
-  // NOTE: `content` is excluded — the content script is bundled, not copied.
-  // NOTE: `config` is excluded — config is resolved at build time via the env plugin.
+  // Copy src files.
+  //
+  // NOTE: `background` and `content` are excluded — they're bundled.
+  // NOTE: `config` is excluded — its env values are inlined into the
+  //       bundles by the env-alias plugin.
+  // NOTE: `popup` IS copied here (for popup.html + popup.css). The
+  //       popup.js file copied here is overwritten by the popup bundle
+  //       step, which runs AFTER copyFiles().
   const srcDirs = ['api', 'popup', 'state', 'utils'];
   for (const dir of srcDirs) {
     const srcPath = `src/${dir}`;
@@ -186,7 +220,8 @@ function verifyNoDevUrlsInProd() {
 
   const bundles = [
     'dist/src/background/service-worker.js',
-    'dist/src/content/bundle.js'
+    'dist/src/content/bundle.js',
+    'dist/src/popup/popup.js'
   ];
 
   const forbidden = [

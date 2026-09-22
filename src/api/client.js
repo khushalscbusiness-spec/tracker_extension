@@ -43,6 +43,46 @@ export class APIClient {
     return headers;
   }
 
+  /**
+   * Extract a human-readable error message from an API response body.
+   *
+   * Handles three shapes Layer 3 can return:
+   *   - Pydantic validation:  { detail: [ { loc: [...], msg: "...", type: "..." } ] }
+   *   - Custom HTTPException: { detail: { error: "...", message: "..." } }
+   *   - Fallback:             { detail: "plain string" }
+   */
+  _extractErrorMessage(body, response) {
+    if (body && typeof body === 'object') {
+      const detail = body.detail;
+
+      // Plain string detail
+      if (typeof detail === 'string') {
+        return detail;
+      }
+
+      // Object detail
+      if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+        if (detail.message) return detail.message;
+        if (detail.error) return detail.error;
+      }
+
+      // Array detail (Pydantic validation errors)
+      if (Array.isArray(detail)) {
+        return detail
+          .map(item => {
+            const loc = Array.isArray(item.loc) ? item.loc.join('.') : '';
+            return loc ? `${loc}: ${item.msg}` : item.msg;
+          })
+          .join('; ');
+      }
+
+      if (body.error) return body.error;
+      if (body.message) return body.message;
+    }
+
+    return response.statusText || 'Unknown error';
+  }
+
   async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
     const timeout = this.config.BACKEND_TIMEOUT || 30000;
@@ -66,8 +106,9 @@ export class APIClient {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-          const error = await response.json().catch(() => ({}));
-          throw new Error(error.detail || `HTTP ${response.status}: ${response.statusText}`);
+          const errorBody = await response.json().catch(() => ({}));
+          const message = this._extractErrorMessage(errorBody, response);
+          throw new Error(message);
         }
 
         return response.json();
@@ -89,9 +130,19 @@ export class APIClient {
 
   async login(email, password) {
     try {
+      // Layer 3 uses OAuth2 password flow, which expects
+      // application/x-www-form-urlencoded with fields:
+      //   username (not email)
+      //   password
       const response = await this.request('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password })
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          username: email,
+          password: password
+        }).toString()
       });
 
       if (response.access_token) {
@@ -119,7 +170,6 @@ export class APIClient {
       throw error;
     }
   }
-
 
   // ============================================
   // CONFIGURATION
