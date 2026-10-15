@@ -107,16 +107,21 @@ class Popup {
   }
 
   async connectToBackground() {
-    this.port = chrome.runtime.connect({ name: 'popup' });
+    try {
+      this.port = chrome.runtime.connect({ name: 'popup' });
 
-    this.port.onMessage.addListener((message) => {
-      this.handlePortMessage(message);
-    });
+      this.port.onMessage.addListener((message) => {
+        this.handlePortMessage(message);
+      });
 
-    this.port.onDisconnect.addListener(() => {
-      console.log('[Popup] Disconnected from background');
-      this.showError('Connection lost. Please reload the extension.');
-    });
+      this.port.onDisconnect.addListener(() => {
+        console.log('[Popup] Disconnected from background');
+        this.port = null;
+      });
+    } catch (error) {
+      console.warn('[Popup] Could not connect to background:', error.message);
+      this.port = null;
+    }
   }
 
   handlePortMessage(message) {
@@ -143,17 +148,68 @@ class Popup {
     }
   }
 
+  /**
+   * Check auth state.
+   *
+   * This method trusts chrome.storage.local, NOT the service worker.
+   * The SW can be asleep or cold-starting, in which case the
+   * chrome.runtime.sendMessage round-trip silently fails. The popup
+   * should still show the correct auth state in that case.
+   *
+   * A token in storage that is not expired locally is treated as
+   * authenticated. The SW is asked for user info as a best-effort
+   * enrichment; failures are ignored.
+   */
   async checkAuth() {
+    const result = await chrome.storage.local.get('access_token');
+    const token = result.access_token;
+
+    if (!token) {
+      this.state.authenticated = false;
+      return;
+    }
+
+    if (!this.isTokenValid(token)) {
+      console.log('[Popup] Token expired locally, clearing');
+      await chrome.storage.local.remove('access_token');
+      this.state.authenticated = false;
+      return;
+    }
+
+    // Trust the token — we're authenticated.
+    this.state.authenticated = true;
+    this.elements.logoutBtn.style.display = 'block';
+
+    // Best-effort: ask the SW for user info. Ignore failures.
     try {
       const response = await chrome.runtime.sendMessage({ type: 'CHECK_AUTH' });
-      this.state.authenticated = response?.authenticated || false;
-      if (this.state.authenticated && response.user) {
+      if (response?.user) {
         this.state.user = response.user;
-        this.elements.logoutBtn.style.display = 'block';
       }
     } catch (error) {
-      console.error('[Popup] Auth check error:', error);
-      this.state.authenticated = false;
+      console.log('[Popup] SW user fetch skipped:', error.message);
+    }
+  }
+
+  /**
+   * Decode a JWT's exp claim and check it against the current time.
+   * Returns true if the token is present, has no exp, or has not yet
+   * expired. Returns false if it's expired or unparseable.
+   *
+   * This is used only as a UX hint — the server is still authoritative
+   * via 401 responses.
+   */
+  isTokenValid(token) {
+    if (!token) return false;
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) return false;
+      const payload = JSON.parse(atob(parts[1]));
+      if (!payload.exp) return true;
+      return Date.now() < payload.exp * 1000;
+    } catch (e) {
+      console.warn('[Popup] Could not decode token:', e.message);
+      return false;
     }
   }
 
@@ -370,6 +426,10 @@ class Popup {
     const email = this.elements.emailInput.value.trim();
     const password = this.elements.passwordInput.value.trim();
 
+    // Clear the DOM immediately after reading. The password lives only
+    // in the local variable and the port message from here on.
+    this.elements.passwordInput.value = '';
+
     if (!email || !password) {
       this.showLoginError('Please enter both email and password');
       return;
@@ -378,6 +438,13 @@ class Popup {
     this.elements.loginBtn.disabled = true;
     this.elements.loginBtn.textContent = 'Signing in...';
     this.elements.loginError.style.display = 'none';
+
+    if (!this.port) {
+      this.showLoginError('Not connected to background. Please reload.');
+      this.elements.loginBtn.disabled = false;
+      this.elements.loginBtn.textContent = 'Sign In';
+      return;
+    }
 
     this.port.postMessage({
       type: 'LOGIN',
@@ -407,8 +474,33 @@ class Popup {
     this.elements.loginError.style.display = 'block';
   }
 
+  /**
+   * Log out.
+   *
+   * Clears storage directly — do not depend on the SW being alive.
+   * Also notifies the SW (best-effort) so it can clean up in-memory
+   * state if it's running.
+   */
   async handleLogout() {
-    this.port.postMessage({ type: 'LOGOUT' });
+    // 1. Clear storage — authoritative source of auth state
+    try {
+      await chrome.storage.local.remove(['access_token', 'access_token_expires_at']);
+    } catch (e) {
+      console.warn('[Popup] Could not clear token from storage:', e);
+    }
+
+    // 2. Best-effort: tell the SW (its port message handler will also
+    //    clear apiClient's in-memory token).
+    try {
+      if (this.port) {
+        this.port.postMessage({ type: 'LOGOUT' });
+      }
+    } catch (e) {
+      console.warn('[Popup] Could not notify SW of logout:', e);
+    }
+
+    // 3. Update UI immediately, don't wait for the SW
+    this.handleLogoutSuccess();
   }
 
   handleLogoutSuccess() {
@@ -429,7 +521,7 @@ class Popup {
 
   openDashboard() {
     // Open the Layer 3 frontend dashboard
-    chrome.tabs.create({ url: 'http://localhost:3000/dashboard' });
+    chrome.tabs.create({ url: 'http://localhost:3000/applications' });
   }
 
   openSignup() {

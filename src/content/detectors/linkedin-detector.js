@@ -91,26 +91,73 @@ export class LinkedInDetector extends BaseDetector {
   }
 
   // ============================================
+  // PAGE TYPE DETECTION
+  // ============================================
+
+  /**
+   * Whether the current LinkedIn page is a "list" page — a page that shows
+   * a job card list with a details panel, rather than a standalone job page.
+   *
+   * Covers: /search-results/, /collections/, /recommended/, /similar/, /tracking/
+   * All of these share the same DOM shape and the same `currentJobId` URL param.
+   */
+  isListPage() {
+    const url = window.location.href;
+    return (
+      url.includes('/search-results/') ||
+      url.includes('/collections/') ||
+      url.includes('/recommended/') ||
+      url.includes('/similar/') ||
+      url.includes('/tracking/')
+    );
+  }
+
+  /**
+   * The detail panel — the right-hand column on list pages that shows
+   * the selected job's full details, including a dedicated apply button.
+   * Authoritative source for title, company, location on list pages.
+   */
+  getDetailPanel() {
+    return document.querySelector(
+      '.scaffold-layout__detail, .jobs-details, .jobs-search__job-details'
+    );
+  }
+
+  // ============================================
   // MAIN DETECTION
   // ============================================
 
   async detect() {
-    const isSearchPage = window.location.href.includes('/search-results/');
-    console.log(`[${this.platform}] ${isSearchPage ? 'Search' : 'Detail'} page detected`);
+    const isListPage = this.isListPage();
+    console.log(`[${this.platform}] ${isListPage ? 'Search' : 'Detail'} page detected`);
     return super.detect();
   }
 
   async waitForPageReady() {
-    const isSearchPage = window.location.href.includes('/search-results/');
-    if (isSearchPage) {
+    const isListPage = this.isListPage();
+
+    if (isListPage) {
       const jobId = this.getJobIdFromUrl();
+
       if (jobId) {
-        const selector = `a[href*="/jobs/view/${jobId}/"]`;
-        await this.waitForElement([selector], 5000);
+        // Wait for the job card link to exist — confirms the list rendered
+        await this.waitForElement([`a[href*="/jobs/view/${jobId}/"]`], 5000);
+
+        // Then wait for the detail panel's company element to have text.
+        // LinkedIn creates these elements empty and fills them a tick later,
+        // so we must wait for content, not just presence.
+        await this.waitForElementWithText(
+          [
+            '.job-details-jobs-unified-top-card__company-name',
+            '.jobs-unified-top-card__company-name'
+          ],
+          3000
+        );
       }
     } else {
       await this.waitForElement(this.selectors.detail.title, 5000);
     }
+
     await this.sleep(300);
   }
 
@@ -119,9 +166,22 @@ export class LinkedInDetector extends BaseDetector {
   // ============================================
 
   async extractTitle() {
-    const isSearchPage = window.location.href.includes('/search-results/');
+    const isListPage = this.isListPage();
 
-    if (isSearchPage) {
+    if (isListPage) {
+      // Prefer the detail panel's dedicated title element
+      const panel = this.getDetailPanel();
+      const panelTitle = panel?.querySelector(
+        '.job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title'
+      );
+      if (panelTitle) {
+        const text = (panelTitle.innerText || panelTitle.textContent || '').trim();
+        if (text && !text.includes('notification')) {
+          return text;
+        }
+      }
+
+      // Fallback: the card's job link text
       const jobId = this.getJobIdFromUrl();
       if (jobId) {
         const link = document.querySelector(`a[href*="/jobs/view/${jobId}/"]`);
@@ -153,49 +213,36 @@ export class LinkedInDetector extends BaseDetector {
   }
 
   async extractCompany() {
-    const isSearchPage = window.location.href.includes('/search-results/');
+    const isListPage = this.isListPage();
 
-    if (isSearchPage) {
+    if (isListPage) {
+      // Prefer the detail panel's dedicated company element
+      const panel = this.getDetailPanel();
+      const panelCompany = panel?.querySelector(
+        '.job-details-jobs-unified-top-card__company-name, .jobs-unified-top-card__company-name'
+      );
+      if (panelCompany) {
+        const text = (panelCompany.innerText || panelCompany.textContent || '').trim();
+        if (text) {
+          console.log('[LinkedIn] Found company via detail panel:', text);
+          return text;
+        }
+      }
+
+      // Fallback: card-scoped company element
       const jobId = this.getJobIdFromUrl();
       if (jobId) {
         const link = document.querySelector(`a[href*="/jobs/view/${jobId}/"]`);
-        if (link) {
-          const title = link.textContent.trim();
-
-          // Method 1: Look in parent elements for company
-          let parent = link.parentElement;
-          let level = 0;
-          while (parent && level < 5) {
-            const parentText = parent.textContent;
-            if (parentText.includes(title) && parentText.length > title.length + 2) {
-              const titleIndex = parentText.indexOf(title);
-              if (titleIndex > 0) {
-                const beforeTitle = parentText.substring(0, titleIndex).trim();
-                if (beforeTitle && beforeTitle.length > 0 && beforeTitle.length < 80) {
-                  const cleaned = beforeTitle.replace(/[·, \n]/g, '').trim();
-                  if (cleaned && !cleaned.match(/\d/) && !cleaned.includes('notification')) {
-                    console.log(`[LinkedIn] Found company at level ${level}:`, cleaned);
-                    return cleaned;
-                  }
-                }
-              }
-            }
-            parent = parent.parentElement;
-            level++;
-          }
-
-          // Method 2: Look for patterns in the text
-          const card = link.closest('div[class*="card"], li, div[class*="item"]');
-          if (card) {
-            const cardText = card.textContent;
-            const pattern = /([A-Z][a-zA-Z0-9\s&.,-]+?)(Senior|Lead|Principal|Staff|Engineer|Developer|Manager|Architect|Analyst|Specialist|Consultant)/i;
-            const match = cardText.match(pattern);
-            if (match && match[1]) {
-              const cleaned = match[1].trim();
-              if (cleaned.length > 1 && cleaned.length < 80 && !cleaned.match(/\d/)) {
-                console.log('[LinkedIn] Found company via pattern:', cleaned);
-                return cleaned;
-              }
+        const card = link?.closest('li, div[class*="search-result"], div[class*="job-card"]');
+        if (card) {
+          const cardCompany = card.querySelector(
+            '.job-card-container__company-name, .job-card-container__primary-description, .artdeco-entity-lockup__subtitle'
+          );
+          if (cardCompany) {
+            const text = (cardCompany.innerText || cardCompany.textContent || '').trim();
+            if (text) {
+              console.log('[LinkedIn] Found company via card element:', text);
+              return text;
             }
           }
         }
@@ -209,23 +256,41 @@ export class LinkedInDetector extends BaseDetector {
   }
 
   async extractLocation() {
-    const isSearchPage = window.location.href.includes('/search-results/');
+    const isListPage = this.isListPage();
 
-    if (isSearchPage) {
+    if (isListPage) {
+      // Prefer the detail panel's dedicated location element
+      const panel = this.getDetailPanel();
+      const panelLocation = panel?.querySelector(
+        '.job-details-jobs-unified-top-card__primary-description-container, .job-details-jobs-unified-top-card__primary-description, .jobs-unified-top-card__primary-description'
+      );
+      if (panelLocation) {
+        const raw = (panelLocation.innerText || panelLocation.textContent || '').trim();
+        if (raw) {
+          // Panel gives "Gurugram, Haryana, India · Reposted 1 day ago · Over 100 people..."
+          // We only want the location part — up to the first "·"
+          const cleaned = raw.split('·')[0].trim();
+          if (cleaned) {
+            console.log('[LinkedIn] Found location via detail panel:', cleaned);
+            return cleaned;
+          }
+        }
+      }
+
+      // Fallback: card-scoped location element
       const jobId = this.getJobIdFromUrl();
       if (jobId) {
         const link = document.querySelector(`a[href*="/jobs/view/${jobId}/"]`);
-        if (link) {
-          const card = link.closest('div[class*="card"], li, div[class*="item"]');
-          if (card) {
-            const location = this.findElement(this.selectors.search.location, card);
-            if (location) return location;
-
-            const cardText = card.textContent;
-            const locationPattern = /([A-Z][a-zA-Z\s]+[,·]\s*[A-Z][a-zA-Z\s]+)/;
-            const match = cardText.match(locationPattern);
-            if (match) {
-              return match[1].trim();
+        const card = link?.closest('li, div[class*="search-result"], div[class*="job-card"]');
+        if (card) {
+          const cardLocation = card.querySelector(
+            '.job-card-container__metadata-item, .job-card-container__location, .artdeco-entity-lockup__caption'
+          );
+          if (cardLocation) {
+            const text = (cardLocation.innerText || cardLocation.textContent || '').trim();
+            if (text) {
+              console.log('[LinkedIn] Found location via card element:', text);
+              return text;
             }
           }
         }
@@ -272,9 +337,9 @@ export class LinkedInDetector extends BaseDetector {
    * @returns {Object} Apply type and URL
    */
   detectApplyType() {
-    const isSearchPage = window.location.href.includes('/search-results/');
+    const isListPage = this.isListPage();
 
-    if (isSearchPage) {
+    if (isListPage) {
       return this.detectApplyTypeFromSearch();
     } else {
       return this.detectApplyTypeFromDetail();
@@ -282,10 +347,10 @@ export class LinkedInDetector extends BaseDetector {
   }
 
   /**
-   * Detect apply type from search results page
+   * Detect apply type from list page
    */
   detectApplyTypeFromSearch() {
-    console.log('[LinkedIn] Detecting apply type from search...');
+    console.log('[LinkedIn] Detecting apply type from list page...');
 
     const result = {
       type: 'unknown',
@@ -301,45 +366,72 @@ export class LinkedInDetector extends BaseDetector {
       return result;
     }
 
-    // Get the page text content once
-    const pageText = document.body.textContent || '';
+    // ── 1. Classify from the current job's apply button ──
+    // The detail panel is authoritative. Its apply button's aria-label
+    // tells us if the current job is Easy Apply or an external redirect.
+    // We must NOT read page-wide text: search-list cards for OTHER jobs
+    // contain "Easy Apply" and would poison the classification.
+    const panel = this.getDetailPanel();
 
-    // 1. Check for Easy Apply (anywhere on page)
-    if (pageText.includes('Easy Apply')) {
-      result.type = 'easy-apply';
-      result.isEasyApply = true;
-      console.log('[LinkedIn] ✅ Easy Apply detected from search');
-      return result;
-    }
+    const button =
+      panel?.querySelector('.jobs-apply-button') ||
+      document.querySelector('.jobs-apply-button');
 
-    // 2. Check for external ATS sources (Lever, Greenhouse, Workday, etc.)
-    const sourcePatterns = {
-      'lever': /lever/i,
-      'greenhouse': /greenhouse/i,
-      'workday': /workday/i,
-      'ashby': /ashby/i,
-      'recruiter': /recruiter\.linkedin\.com/i
-    };
+    if (button) {
+      const aria = (button.getAttribute('aria-label') || '').trim();
+      const ariaLower = aria.toLowerCase();
 
-    for (const [source, pattern] of Object.entries(sourcePatterns)) {
-      if (pattern.test(pageText)) {
+      // On-site apply — LinkedIn labels the button "Easy Apply to <title>"
+      if (ariaLower.startsWith('easy apply')) {
+        result.type = 'easy-apply';
+        result.isEasyApply = true;
+        console.log('[LinkedIn] ✅ Easy Apply detected from apply button:', aria);
+        return result;
+      }
+
+      // External apply — LinkedIn labels the button
+      // "Apply to <title> on company website"
+      if (ariaLower.includes('on company website') ||
+          ariaLower.includes('apply externally')) {
         result.type = 'external';
         result.isExternal = true;
-        result.source = source;
-        console.log(`[LinkedIn] ✅ External source detected from search: ${source}`);
+
+        // Try to find a redirect URL on the button or its container
+        const href = button.href || button.closest('a')?.href || null;
+        if (href) {
+          result.url = href;
+          result.source = this.detectSourceFromUrl(href);
+        } else {
+          result.source = 'company-website';
+        }
+
+        console.log('[LinkedIn] ✅ External apply detected from apply button:', aria);
         return result;
       }
     }
 
-    // 3. Check for "LinkedIn Apply" text - this is the default apply
-    if (pageText.includes('LinkedIn Apply')) {
-      result.type = 'unknown';
-      console.log('[LinkedIn] Standard LinkedIn Apply detected');
-      return result;
+    // ── 2. Fallback: search inside the current job's card only ──
+    const card = this.getCurrentJobCard();
+    if (card) {
+      const cardText = card.textContent || '';
+      if (cardText.includes('Easy Apply')) {
+        result.type = 'easy-apply';
+        result.isEasyApply = true;
+        console.log('[LinkedIn] ✅ Easy Apply detected from current job card');
+        return result;
+      }
     }
 
-    console.log('[LinkedIn] No apply information found on search page');
+    console.log('[LinkedIn] No apply information found on list page');
     return result;
+  }
+
+  getCurrentJobCard() {
+    const jobId = this.getJobIdFromUrl();
+    if (!jobId) return null;
+    const link = document.querySelector(`a[href*="/jobs/view/${jobId}/"]`);
+    if (!link) return null;
+    return link.closest('li, div[class*="search-result"], div[class*="job-card"], div[class*="scaffold-layout__list-item"]');
   }
 
   /**
@@ -558,11 +650,11 @@ export class LinkedInDetector extends BaseDetector {
   // ============================================
 
   async extractExtraFields() {
-    const isSearchPage = window.location.href.includes('/search-results/');
+    const isListPage = this.isListPage();
     const extra = {};
 
     // Basic fields for detail page
-    if (!isSearchPage) {
+    if (!isListPage) {
       const description = this.findElement(this.selectors.detail.description);
       if (description) extra.description = description;
       const postedDate = this.findElement(this.selectors.detail.postedDate);
@@ -628,8 +720,8 @@ export class LinkedInDetector extends BaseDetector {
 
   validateJob(job) {
     if (!job) return false;
-    const isSearchPage = window.location.href.includes('/search-results/');
-    if (isSearchPage) {
+    const isListPage = this.isListPage();
+    if (isListPage) {
       if (!job.title || job.title.length < 2) return false;
       if (!job.url || !job.url.startsWith('http')) return false;
       if (!job.platform) return false;

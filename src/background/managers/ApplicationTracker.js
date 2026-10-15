@@ -110,7 +110,7 @@ export class ApplicationTracker {
   /**
    * Handle apply button click from content script
    */
-  async handleApplyClick(data, callback) {
+    async handleApplyClick(data, callback) {
     console.log('[ApplicationTracker] 📌 Processing apply click...');
     console.log(`[ApplicationTracker]   Job: ${data.jobData.title}`);
     console.log(`[ApplicationTracker]   Company: ${data.jobData.company}`);
@@ -119,14 +119,30 @@ export class ApplicationTracker {
     try {
       const session = sessionManager.createSession(data.jobData, data.applyData);
 
-      // Detect ATS and set strategy
-      const strategy = strategyFactory.getStrategy(data.applyData.redirectUrl);
-      session.ats = strategy.getAtsName();
-      session.atsName = strategy.getDisplayName();
-      session.atsStrategy = strategy;
+      const isOnSiteApply = data.applyData?.applyMethod === 'on_site_apply';
 
-      console.log(`[ApplicationTracker] ✅ Session created: ${session.sessionId}`);
-      console.log(`[ApplicationTracker]   ATS detected: ${session.atsName}`);
+      if (isOnSiteApply) {
+        // On-site apply: user never left the job board.
+        // The board itself is the "ATS" — no external strategy.
+        const board = data.applyData.hostBoard || data.jobData.platform || 'unknown';
+        const boardLabel = board.charAt(0).toUpperCase() + board.slice(1);
+
+        session.ats = board;
+        session.atsName = `${boardLabel} On-Site Apply`;
+        session.atsStrategy = null;
+
+        console.log(`[ApplicationTracker] ✅ Session created: ${session.sessionId}`);
+        console.log(`[ApplicationTracker]   Channel: ${session.atsName}`);
+      } else {
+        // External redirect — detect ATS and set strategy
+        const strategy = strategyFactory.getStrategy(data.applyData.redirectUrl);
+        session.ats = strategy.getAtsName();
+        session.atsName = strategy.getDisplayName();
+        session.atsStrategy = strategy;
+
+        console.log(`[ApplicationTracker] ✅ Session created: ${session.sessionId}`);
+        console.log(`[ApplicationTracker]   ATS detected: ${session.atsName}`);
+      }
 
       session.applyData = data.applyData;
 
@@ -149,7 +165,7 @@ export class ApplicationTracker {
           url: sourceUrl,
           timestamp: Date.now(),
           tabId: data.applyData.sourceTabId || null,
-          title: data.jobData.title || 'LinkedIn Job',
+          title: data.jobData.title || 'Job Page',
           order: 1,
           label: this.getUrlLabel(sourceUrl),
           jobId: jobId
@@ -160,7 +176,8 @@ export class ApplicationTracker {
         }
       }
 
-      if (data.applyData.redirectUrl && data.applyData.redirectUrl !== sourceUrl) {
+      // Only push a redirect URL for external applies — on-site apply has none.
+      if (!isOnSiteApply && data.applyData.redirectUrl && data.applyData.redirectUrl !== sourceUrl) {
         const exists = session.visitedUrls.some(entry => entry.url === data.applyData.redirectUrl);
         if (!exists) {
           const order = session.visitedUrls.length + 1;
@@ -203,38 +220,47 @@ export class ApplicationTracker {
   /**
    * Handle tab created event
    */
-  async handleTabCreated(event) {
+    async handleTabCreated(event) {
     console.log(`[ApplicationTracker] 📂 Tab created: ${event.tabId}`);
     console.log(`[ApplicationTracker]   Opener tab ID: ${event.openerTabId}`);
 
-    // 1. Check if this tab was opened from a LinkedIn tab (first redirect)
-    const pendingSessions = sessionManager.getActiveSessions().filter(
-      s => s.status === 'initiated' && !s.redirectTabId
-    );
+    // ── 1. Highest priority: a session specifically waiting for a redirect
+    //        from this opener tab. This is the "clicked Apply, waiting for
+    //        the new tab" case. Sort by most recent so concurrent flows
+    //        (multiple sessions on the same source tab) resolve correctly.
+    const pendingSessions = sessionManager.getActiveSessions()
+      .filter(s => s.status === 'initiated' && !s.redirectTabId)
+      .filter(s => s.sourceTabId === event.openerTabId)
+      .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
 
     if (pendingSessions.length > 0) {
-      const session = pendingSessions.find(s => s.sourceTabId === event.openerTabId);
-      if (session) {
-        console.log(`[ApplicationTracker] ✅ Found session for tab: ${session.sessionId}`);
-        sessionManager.mapTabToSession(event.tabId, session.sessionId);
-        await this._pushTabUrlToSession(session, event.tabId);
+      const session = pendingSessions[0];
+      console.log(`[ApplicationTracker] ✅ Found pending session for tab: ${session.sessionId}`);
+      console.log(`[ApplicationTracker]   Job: ${session.jobTitle}`);
 
-        const updated = sessionManager.updateSession(session.sessionId, {
-          status: 'redirecting',
-          redirectTabId: event.tabId,
-          redirectedAt: Date.now()
-        });
+      sessionManager.mapTabToSession(event.tabId, session.sessionId);
+      await this._pushTabUrlToSession(session, event.tabId);
 
-        const redirectingState = new STATES.redirecting(updated);
+      const updated = sessionManager.updateSession(session.sessionId, {
+        status: 'redirecting',
+        redirectTabId: event.tabId,
+        redirectedAt: Date.now()
+      });
+
+      const redirectingState = new STATES.redirecting(updated);
+      if (updated.currentState) {
         updated.currentState.transitionTo(redirectingState);
-
-        console.log(`[ApplicationTracker] ✅ Session transitioned to RedirectingState`);
-        console.log(`[ApplicationTracker]   Tracking tab: ${event.tabId}`);
-        return;
+      } else {
+        redirectingState.onEnter();
+        updated.currentState = redirectingState;
       }
+
+      console.log(`[ApplicationTracker] ✅ Session transitioned to RedirectingState`);
+      console.log(`[ApplicationTracker]   Tracking tab: ${event.tabId}`);
+      return;
     }
 
-    // 2. Check ALL active sessions
+    // ── 2. Broader scan across all active sessions
     const allSessions = sessionManager.getActiveSessions();
     console.log(`[ApplicationTracker]   Checking ${allSessions.length} active sessions`);
 
@@ -242,10 +268,19 @@ export class ApplicationTracker {
       console.log(`[ApplicationTracker]   Session ${s.sessionId}: status=${s.status}, trackedTabs=${s.trackedTabs?.join(', ') || 'none'}`);
     }
 
-    // FIRST PASS: by opener tab ID
-    for (const session of allSessions) {
-      if (session.status === 'submitted' || session.status === 'abandoned') continue;
+    // FIRST PASS: by opener tab ID — prefer sessions that are actively
+    // progressing (redirecting/in_progress) over stale initiated ones.
+    const sortedSessions = allSessions
+      .filter(s => s.status !== 'submitted' && s.status !== 'abandoned')
+      .sort((a, b) => {
+        // Prefer sessions that already started a redirect (higher activity)
+        const rankA = a.status === 'in_progress' ? 3 : a.status === 'redirecting' ? 2 : a.status === 'initiated' ? 1 : 0;
+        const rankB = b.status === 'in_progress' ? 3 : b.status === 'redirecting' ? 2 : b.status === 'initiated' ? 1 : 0;
+        if (rankA !== rankB) return rankB - rankA;
+        return (b.lastActivityAt || 0) - (a.lastActivityAt || 0);
+      });
 
+    for (const session of sortedSessions) {
       if (session.trackedTabs && session.trackedTabs.includes(event.openerTabId)) {
         console.log(`[ApplicationTracker] ✅✅ Tab ${event.tabId} opened from tracked tab ${event.openerTabId}`);
         console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
@@ -258,9 +293,7 @@ export class ApplicationTracker {
     }
 
     // SECOND PASS: by redirect tab ID
-    for (const session of allSessions) {
-      if (session.status === 'submitted' || session.status === 'abandoned') continue;
-
+    for (const session of sortedSessions) {
       if (session.redirectTabId === event.openerTabId) {
         console.log(`[ApplicationTracker] ✅ Tab ${event.tabId} opened from redirect tab ${event.openerTabId}`);
         console.log(`[ApplicationTracker]   Session: ${session.sessionId}`);
@@ -279,8 +312,7 @@ export class ApplicationTracker {
       if (this.isJobPageFromUrl(url)) {
         console.log(`[ApplicationTracker] 🎯 New tab is a job page: ${url}`);
 
-        const candidates = allSessions
-          .filter(s => s.status !== 'submitted' && s.status !== 'abandoned')
+        const candidates = sortedSessions
           .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
 
         if (candidates.length > 0) {
@@ -360,7 +392,7 @@ export class ApplicationTracker {
   /**
    * Handle tab updated event
    */
-  async handleTabUpdated(event) {
+    async handleTabUpdated(event) {
     const session = sessionManager.getSessionByTabId(event.tabId);
     if (!session) {
       const allSessions = sessionManager.getActiveSessions();
@@ -373,6 +405,15 @@ export class ApplicationTracker {
       }
 
       if (this.isJobPageFromUrl(event.url)) {
+        // Confirmation URLs are always the END of a flow — never a new start.
+        // If a confirmation page loads without a session, the session was
+        // either already submitted (correctly) or lost. Either way, creating
+        // a new session here produces garbage like "Thank you for applying at Job-boards".
+        if (this.isConfirmationUrl(event.url)) {
+          console.log(`[ApplicationTracker] ⚠️ Confirmation URL with no session — ignoring: ${event.url}`);
+          return;
+        }
+
         const existingSession = this.findSessionForUrl(event.url);
 
         if (existingSession) {
@@ -410,12 +451,40 @@ export class ApplicationTracker {
   }
 
   /**
+   * Whether a URL looks like a confirmation / thank-you / success page.
+   * Used to prevent auto-session-creation on the terminal page of a flow.
+   */
+  isConfirmationUrl(url) {
+    if (!url) return false;
+    const lower = url.toLowerCase();
+    return (
+      lower.includes('/confirmation') ||
+      lower.includes('/thank-you') ||
+      lower.includes('/thank_you') ||
+      lower.includes('/thankyou') ||
+      lower.includes('/success') ||
+      lower.includes('/submitted') ||
+      lower.includes('/application-submitted') ||
+      lower.includes('thank you for applying') ||
+      lower.includes('thank-you-for-applying')
+    );
+  }
+
+  /**
    * Process session update - handles ALL URL changes in tracked tabs
    */
-  async processSessionUpdate(session, event) {
+    async processSessionUpdate(session, event) {
     if (!session) return;
 
     if (session.status === 'submitted' || session.status === 'abandoned') {
+      return;
+    }
+
+    // On-site apply: user never left the job board.
+    // No external ATS strategy, no URL-based step detection, no success-page check.
+    // Success is driven entirely by the content script's modal watcher
+    // via the SUCCESS_DETECTED message.
+    if (session.applyMethod === 'on_site_apply') {
       return;
     }
 

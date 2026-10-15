@@ -177,6 +177,35 @@ export class BaseDetector {
     return null;
   }
 
+    /**
+   * Wait for an element to exist AND have non-empty text.
+   *
+   * LinkedIn (and some SPAs) create DOM nodes empty and populate them
+   * a tick later. `waitForElement` returns as soon as the node exists,
+   * which can be too early. This variant polls until the node also
+   * has content.
+   *
+   * @param {string[]} selectors - Selectors to try
+   * @param {number} timeout - Timeout in milliseconds
+   * @returns {Promise<Element|null>}
+   */
+  async waitForElementWithText(selectors, timeout = 5000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+      for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (element) {
+          const text = (element.innerText || element.textContent || '').trim();
+          if (text) {
+            return element;
+          }
+        }
+      }
+      await this.sleep(100);
+    }
+    return null;
+  }
+
   cleanText(text) {
     if (!text) return '';
     return text.replace(/[\n\r\t]/g, ' ').replace(/\s+/g, ' ').trim();

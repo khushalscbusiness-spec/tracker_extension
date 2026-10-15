@@ -69,6 +69,23 @@ async function getAuthToken() {
 }
 
 /**
+ * Clear the auth token from storage.
+ *
+ * Called when the receiver rejects the token with 401. Clearing
+ * the token here ensures the popup and the service worker see the
+ * session as logged out on their next check.
+ *
+ * @returns {Promise<void>}
+ */
+async function clearAuthToken() {
+  try {
+    await chrome.storage.local.remove(['access_token', 'access_token_expires_at']);
+  } catch (e) {
+    console.warn('[ReceiverAPI] Could not clear auth token:', e);
+  }
+}
+
+/**
  * Extract a human-readable error message from a failed response body.
  *
  * The receiver returns errors in different shapes depending on
@@ -164,6 +181,15 @@ async function request(method, path, body = null) {
 
   if (!response.ok) {
     const message = extractErrorMessage(data, response);
+
+    // 401 means the token is expired or invalid. Clear it so the
+    // popup shows the login form on its next open. The event itself
+    // goes to failedSubmissions, where a future drain can retry it
+    // after re-login.
+    if (response.status === 401) {
+      await clearAuthToken();
+    }
+
     throw new Error(`HTTP ${response.status}: ${message}`);
   }
 

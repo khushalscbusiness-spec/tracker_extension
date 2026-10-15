@@ -271,6 +271,18 @@ export class SessionManager {
     if (updates.status === 'submitted' || updates.status === 'abandoned') {
       this.activeSessionIds.delete(sessionId);
       this.completedSessionIds.add(sessionId);
+
+      // ✅ Release tab mappings so the next job on the same tab
+      //    starts a fresh session instead of inheriting this one.
+      if (session.trackedTabs && session.trackedTabs.length > 0) {
+        for (const tabId of session.trackedTabs) {
+          if (this.tabToSession.get(tabId) === sessionId) {
+            this.tabToSession.delete(tabId);
+            console.log(`[SessionManager] 🔓 Released tab ${tabId} from completed session ${sessionId}`);
+          }
+        }
+        session.trackedTabs = [];
+      }
     }
 
     console.log(`[SessionManager] ✅ Session updated: ${sessionId}`);

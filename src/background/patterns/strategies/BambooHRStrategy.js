@@ -50,13 +50,8 @@ export class BambooHRStrategy extends SubmissionDetectionStrategy {
 
   canHandle(url) {
     if (!url) return false;
-    const urlLower = url.toLowerCase();
-
-    if (urlLower.includes('bamboohr.com')) {
-      return true;
-    }
-
-    return false;
+    const clean = this.cleanUrl(url);
+    return clean.includes('bamboohr.com');
   }
 
   isSuccessPage(url) {

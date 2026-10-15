@@ -175,6 +175,34 @@ export class SubmissionDetectionStrategy {
   }
 
   /**
+     * Normalize a URL for strategy matching.
+     *
+     * Strips the query string and hash so that a strategy's substring
+     * checks can't accidentally match on tracking parameters.
+     *
+     * Example of the bug this prevents:
+     *   https://www.linkedin.com/jobs/view/4423880462/?applicantTrackingSystemName=Lever
+     *   → cleanUrl() returns https://www.linkedin.com/jobs/view/4423880462/
+     *   → LeverStrategy no longer matches, because "lever" is gone.
+     *
+     * Strategies that intentionally read query params (Greenhouse's
+     * gh_jid / gh_src) must use the original `url` argument, not this.
+     *
+     * @param {string} url
+     * @returns {string} origin + pathname, lowercased. Falls back to the
+     *                   raw lowercased input if the URL can't be parsed.
+   */
+  cleanUrl(url) {
+    if (!url || typeof url !== 'string') return '';
+    try {
+      const u = new URL(url);
+      return (u.origin + u.pathname).toLowerCase();
+    } catch {
+      return url.toLowerCase();
+    }
+  }
+
+  /**
    * Extract ATS name from URL
    * @param {string} url - The URL
    * @returns {string} Extracted ATS name or null

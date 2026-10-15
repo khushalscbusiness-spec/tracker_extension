@@ -60,20 +60,21 @@ export class AshbyStrategy extends SubmissionDetectionStrategy {
    * @param {string} url - The URL to check
    * @returns {boolean} True if it's an Ashby URL
    */
-  canHandle(url) {
+    canHandle(url) {
     if (!url) return false;
 
-    const urlLower = url.toLowerCase();
+    const clean = this.cleanUrl(url);
 
-    // Check for Ashby domains
-    if (urlLower.includes('ashbyhq.com') ||
-        urlLower.includes('ashby.com') ||
-        urlLower.includes('jobs.ashbyhq.com')) {
+    if (clean.includes('ashbyhq.com') ||
+        clean.includes('ashby.com') ||
+        clean.includes('jobs.ashbyhq.com')) {
+      console.log(`[AshbyStrategy] ✅ Can handle URL: ${clean}`);
       return true;
     }
 
-    // Check for Ashby-specific paths
-    if (urlLower.includes('/application') && urlLower.includes('ashby')) {
+    // Path-based fallback — no query string, so no false positives
+    if (clean.includes('/application') && clean.includes('ashby')) {
+      console.log(`[AshbyStrategy] ✅ Can handle URL (path match): ${clean}`);
       return true;
     }
 

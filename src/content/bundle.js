@@ -85,6 +85,9 @@ class JobPulse {
     this.isDetecting = false;
     this.lastUrl = window.location.href;
     this.applyButtonListenerAttached = false;
+    this.lastAttachedJobId = null;
+    this.applyButtonElement = null;
+    this.applyButtonListener = null;
     this.init();
   }
 
@@ -189,14 +192,6 @@ class JobPulse {
   // ============================================
 
   setupApplyButtonDetection() {
-    const currentUrl = window.location.href;
-    if (currentUrl !== this.lastUrl) {
-      this.lastUrl = currentUrl;
-      this.applyButtonListenerAttached = false;
-    }
-
-    if (this.applyButtonListenerAttached) return;
-
     const job = this.currentJob;
     if (!job) {
       console.log('[JobPulse] No job detected yet, cannot setup apply button detection');
@@ -209,124 +204,300 @@ class JobPulse {
       return;
     }
 
+    // Skip only if we've already attached for THIS job.
+    if (this.applyButtonListenerAttached && this.lastAttachedJobId === jobId) {
+      console.log('[JobPulse] Apply button listener already attached for job:', jobId);
+      return;
+    }
+
+    // Remove the previous listener from the previous button, if any.
+    // Without this, listeners accumulate across SPA navigations and
+    // one click fires N times (once per visited job).
+    if (this.applyButtonElement && this.applyButtonListener) {
+      this.applyButtonElement.removeEventListener('click', this.applyButtonListener);
+      console.log('[JobPulse] Removed previous apply button listener');
+    }
+    this.applyButtonElement = null;
+    this.applyButtonListener = null;
+
     console.log('[JobPulse] Setting up apply button detection for job:', jobId);
 
-    let result = null;
-
-    if (this.detector && typeof this.detector.detectApplyType === 'function') {
-      const applyType = this.detector.detectApplyType();
-      if (applyType && applyType.type !== 'unknown') {
-        const button = this.findApplyButtonElement();
-        if (button) {
-          result = {
-            type: applyType.isEasyApply ? 'Easy Apply' : 'External Redirect',
-            element: button,
-            url: applyType.url || null,
-            source: applyType.source || null
-          };
-        }
-      }
-    }
-
-    if (!result) {
-      const button = this.findApplyButtonElement();
-      if (button) {
-        const buttonText = button.textContent?.toLowerCase() || '';
-        const isEasyApply = buttonText.includes('easy') ||
-                           button.className?.includes('easy') ||
-                           button.closest('[data-test-easy-apply-button]');
-
-        result = {
-          type: isEasyApply ? 'Easy Apply' : 'External Redirect',
-          element: button
-        };
-      }
-    }
-
-    if (result) {
-      this.applyButtonListenerAttached = true;
-      console.log(`[JobPulse] Found Button Type: ${result.type}`);
-
-      result.element.addEventListener('click', (event) => {
-
-        console.log(`[JobPulse] USER CLICKED on: ${result.type}`);
-
-        try {
-          chrome.runtime.sendMessage({
-            type: 'APPLY_BUTTON_CLICKED',
-            payload: {
-              applyType: result.type,
-              timestamp: Date.now(),
-              job: this.currentJob,
-              applyUrl: result.url || null,
-              applySource: result.source || null
-            }
-          }, (response) => {
-            if (chrome.runtime.lastError) {
-              console.warn('[JobPulse] Send apply click error:', chrome.runtime.lastError);
-            }
-          });
-        } catch (e) {
-          console.warn('[JobPulse] Could not send apply click to background:', e);
-        }
-
-        if (result.type === 'Easy Apply') {
-          console.log('[JobPulse] Waiting for Easy Apply modal...');
-
-          const modalObserver = new MutationObserver((mutations, obs) => {
-            const modal = document.querySelector('div[role="dialog"], div[data-test-modal], iframe[title*="Apply"]');
-            if (modal) {
-              console.log('[JobPulse] ✅ Easy Apply Modal Detected');
-              obs.disconnect();
-            }
-          });
-
-          modalObserver.observe(document.body, { childList: true, subtree: true });
-          setTimeout(() => modalObserver.disconnect(), 10000);
-        } else if (result.type === 'External Redirect') {
-          console.log('[JobPulse] External redirect initiated by user.');
-        }
-
-      }, { once: false });
-    } else {
+    const button = this.findApplyButtonElement();
+    if (!button) {
       console.log('[JobPulse] No apply button found on this page');
+      return;
     }
+
+    // ── Classification comes from the detector (single source of truth) ──
+    // LinkedIn detector sets job.applyType = 'easy-apply' | 'external'
+    const isOnSiteApply = job.applyType === 'easy-apply';
+    const hostBoard = job.platform || 'unknown';
+    const applyTypeDisplay = isOnSiteApply ? 'On-Site Apply' : 'External Redirect';
+
+    // Attempt to extract an external URL if this is an external apply
+    let applyUrl = button.href || null;
+    if (applyUrl && applyUrl.includes('safety/go?url=')) {
+      // LinkedIn wraps external links — unwrap to the real destination
+      try {
+        const urlParams = new URLSearchParams(applyUrl.split('?')[1]);
+        const encoded = urlParams.get('url');
+        if (encoded) applyUrl = decodeURIComponent(encoded);
+      } catch (e) {
+        // Leave applyUrl as-is
+      }
+    }
+
+    this.applyButtonListenerAttached = true;
+    this.lastAttachedJobId = jobId;
+    console.log(`[JobPulse] Found Button Type: ${applyTypeDisplay}`);
+    console.log(`[JobPulse]   isOnSiteApply: ${isOnSiteApply}`);
+    console.log(`[JobPulse]   hostBoard: ${hostBoard}`);
+
+    // Store the listener so we can remove it next time.
+    this.applyButtonListener = (event) => {
+      console.log('========================================');
+      console.log(`[JobPulse] USER CLICKED on: ${applyTypeDisplay}`);
+      console.log(`[JobPulse]   jobId: ${jobId}`);
+      console.log(`[JobPulse]   applyUrl: ${applyUrl || '(none)'}`);
+      console.log('========================================');
+
+      try {
+        chrome.runtime.sendMessage({
+          type: 'APPLY_BUTTON_CLICKED',
+          payload: {
+            applyType: isOnSiteApply ? 'on_site_apply' : 'external_redirect',
+            isOnSiteApply,
+            hostBoard,
+            timestamp: Date.now(),
+            job: this.currentJob,
+            applyUrl,
+            applySource: isOnSiteApply ? hostBoard : null
+          }
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn('[JobPulse] Send apply click error:', chrome.runtime.lastError);
+          }
+        });
+      } catch (e) {
+        console.warn('[JobPulse] Could not send apply click to background:', e);
+      }
+
+      // ── On-site apply modal watcher ────────────────────────
+      if (isOnSiteApply) {
+        console.log('[JobPulse] Starting on-site apply modal watcher...');
+        this.watchEasyApplyModal();
+      }
+    };
+
+    this.applyButtonElement = button;
+    button.addEventListener('click', this.applyButtonListener);
+  }
+
+    /**
+   * Watch for LinkedIn's Easy Apply success state.
+   *
+   * Easy Apply never changes the URL and never opens a new tab —
+   * everything happens inside a modal. We detect success by
+   * watching the page text for LinkedIn's confirmation phrases.
+   *
+   * On detection, we send SUCCESS_DETECTED to the service worker
+   * (the same message the external ATS flow uses), which routes
+   * it to the session → SubmittedState → payload → Layer 2.
+   */
+  watchEasyApplyModal() {
+    if (this.easyApplyObserver) {
+      this.easyApplyObserver.disconnect();
+    }
+
+    // Phrases LinkedIn shows after an Easy Apply succeeds.
+    // Confirmed by DOM inspection: "your application was sent"
+    // is the primary phrase. Others are fallbacks.
+    const successPhrases = [
+      'your application was sent',
+      'application sent',
+      'application submitted',
+      'your application has been submitted',
+      'we received your application',
+      'successfully applied'
+    ];
+
+    let detected = false;
+
+    const checkForSuccess = () => {
+      if (detected) return;
+
+      // Prefer the modal if present — success text appears there
+      let text = '';
+      const dialog = document.querySelector('[role="dialog"]');
+      if (dialog) {
+        text = (dialog.innerText || '').toLowerCase();
+      } else {
+        // Fallback to page text
+        text = (document.body.innerText || '').toLowerCase();
+      }
+
+      if (!text) return;
+
+      // Also filter out obvious job-description text — we don't
+      // want to trigger on a JD that happens to mention these words.
+      if (text.includes('responsibilities:') ||
+          text.includes('qualifications:') ||
+          text.includes('we are looking for')) {
+        return;
+      }
+
+      for (const phrase of successPhrases) {
+        if (text.includes(phrase)) {
+          detected = true;
+          console.log('========================================');
+          console.log('[JobPulse] 🎉 Easy Apply SUCCESS detected!');
+          console.log('[JobPulse]   phrase:', phrase);
+          console.log('[JobPulse]   url:', window.location.href);
+          console.log('========================================');
+
+          try {
+            chrome.runtime.sendMessage({
+              type: 'SUCCESS_DETECTED',
+              payload: {
+                url: window.location.href,
+                phrase: phrase,
+                pageTitle: document.title,
+                isIframe: false,
+                detectionMethod: 'easy_apply_modal',
+                detectedAt: Date.now()
+              }
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                console.warn('[JobPulse] Send success error:', chrome.runtime.lastError);
+              } else {
+                console.log('[JobPulse] ✅ Success sent to background');
+              }
+            });
+          } catch (e) {
+            console.warn('[JobPulse] Could not send success to background:', e);
+          }
+
+          if (this.easyApplyObserver) {
+            this.easyApplyObserver.disconnect();
+            this.easyApplyObserver = null;
+          }
+          if (this.easyApplyInterval) {
+            clearInterval(this.easyApplyInterval);
+            this.easyApplyInterval = null;
+          }
+          return;
+        }
+      }
+    };
+
+    // 1. Watch DOM mutations (fast reaction)
+    this.easyApplyObserver = new MutationObserver(() => {
+      checkForSuccess();
+    });
+    this.easyApplyObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+
+    // 2. Poll every 2 seconds (backup — some modals don't fire mutations)
+    this.easyApplyInterval = setInterval(checkForSuccess, 2000);
+
+    // 3. Immediate first check
+    checkForSuccess();
+
+    // 4. Safety cleanup after 10 minutes
+    setTimeout(() => {
+      if (this.easyApplyObserver) {
+        this.easyApplyObserver.disconnect();
+        this.easyApplyObserver = null;
+      }
+      if (this.easyApplyInterval) {
+        clearInterval(this.easyApplyInterval);
+        this.easyApplyInterval = null;
+      }
+    }, 10 * 60 * 1000);
   }
 
   findApplyButtonElement() {
-    const selectors = [
-      '.jobs-apply-button',
-      '[data-test-apply-button]',
-      '.apply-button',
-      'a[data-test-apply-button]',
-      'button[class*="apply"]',
-      'a[class*="apply"]',
-      '.jobs-apply-button--easy-apply',
-      '[data-test-easy-apply-button]',
-      '.easy-apply-button'
-    ];
+      // ── 1. Class-based selectors (fast path, usually dead now) ──
+      // LinkedIn has hashed most class names, so these rarely match.
+      // Kept as a fast path in case any readable classes come back.
+      const classSelectors = [
+        '.jobs-apply-button',
+        '[data-test-apply-button]',
+        '.jobs-apply-button--easy-apply',
+        '[data-test-easy-apply-button]',
+        '.easy-apply-button'
+      ];
 
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      if (element) {
-        console.log('[JobPulse] Found apply button with selector:', selector);
-        return element;
-      }
-    }
-
-    const allElements = document.querySelectorAll('button, a');
-    for (const el of allElements) {
-      const text = el.textContent?.toLowerCase() || '';
-      if (text.includes('apply') && !text.includes('easy')) {
-        const href = el.href || '';
-        if (href.includes('apply') || href.includes('jobs') || el.closest('[class*="job"]')) {
-          console.log('[JobPulse] Found apply button by text search');
+      for (const selector of classSelectors) {
+        const el = document.querySelector(selector);
+        if (el) {
+          console.log('[JobPulse] Found apply button with selector:', selector);
           return el;
         }
       }
-    }
 
-    return null;
+      // ── 2. Text / aria matching ──────────────────────────────
+      // LinkedIn's current UI uses hashed CSS classes, so we match
+      // by accessible name instead.
+      //
+      // IMPORTANT: restrict to actual clickable elements. The
+      // search-results page is full of DIVs whose innerText includes
+      // "Apply" (each job card), which would otherwise match.
+      const clickable = document.querySelectorAll('button, a, [role="button"]');
+
+      // Priority 1: aria-label exactly "Easy Apply to this job"
+      for (const el of clickable) {
+        const aria = (el.getAttribute('aria-label') || '').trim();
+        if (aria === 'Easy Apply to this job') {
+          console.log('[JobPulse] Found apply button via aria-label:', aria);
+          return el;
+        }
+      }
+
+      // Priority 2: aria-label starts with "Easy Apply"
+      for (const el of clickable) {
+        const aria = (el.getAttribute('aria-label') || '').trim();
+        if (aria.toLowerCase().startsWith('easy apply')) {
+          console.log('[JobPulse] Found apply button via aria-label prefix:', aria);
+          return el;
+        }
+      }
+
+      // Priority 3: exact visible text "Easy Apply"
+      for (const el of clickable) {
+        const text = (el.textContent || '').trim();
+        if (text === 'Easy Apply') {
+          console.log('[JobPulse] Found apply button via exact text:', text);
+          return el;
+        }
+      }
+
+      // Priority 4: aria/text for external apply
+      for (const el of clickable) {
+        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+        const text = (el.textContent || '').trim().toLowerCase();
+        if (aria.includes('apply on company website') ||
+            aria.includes('apply externally') ||
+            text === 'apply') {
+          console.log('[JobPulse] Found external apply button via:', aria || text);
+          return el;
+        }
+      }
+
+      // Priority 5: text contains "Easy Apply" (not "Applied")
+      for (const el of clickable) {
+        const text = (el.textContent || '').trim().toLowerCase();
+        if (text.includes('easy apply') && !text.includes('applied')) {
+          console.log('[JobPulse] Found apply button via text contains:', text);
+          return el;
+        }
+      }
+
+      console.warn('[JobPulse] No apply button found via any strategy');
+      return null;
   }
 
   detectApplyButton() {

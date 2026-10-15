@@ -52,10 +52,12 @@ export class SmartRecruitersStrategy extends SubmissionDetectionStrategy {
 
   canHandle(url) {
     if (!url) return false;
-    const urlLower = url.toLowerCase();
 
-    if (urlLower.includes('smartrecruiters.com') ||
-        urlLower.includes('jobs.smartrecruiters.com')) {
+    const clean = this.cleanUrl(url);
+
+    if (clean.includes('smartrecruiters.com') ||
+        clean.includes('jobs.smartrecruiters.com')) {
+      console.log(`[SmartRecruitersStrategy] ✅ Can handle URL: ${clean}`);
       return true;
     }
 

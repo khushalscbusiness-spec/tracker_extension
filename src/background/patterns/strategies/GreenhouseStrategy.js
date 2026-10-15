@@ -107,40 +107,40 @@ export class GreenhouseStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a Greenhouse URL
    */
   canHandle(url) {
-    // ✅ NULL CHECK
-    if (!url) return false;
+      if (!url) return false;
 
-    // ✅ 1. Domain match
-    const patterns = [
-      /greenhouse\.io/,
-      /grnh\.se/,
-      /boards\.greenhouse\.io/,
-      /job-boards\.greenhouse\.io/
-    ];
+      const clean = this.cleanUrl(url);   // origin + path, no query/hash
+      const full = url.toLowerCase();     // needed for gh_jid / gh_src
 
-    for (const pattern of patterns) {
-      if (this.matchesDomain(url, pattern)) {
-        console.log(`[GreenhouseStrategy] ✅ Can handle URL (domain): ${url}`);
+      // 1. Domain match
+      const patterns = [
+        /greenhouse\.io/,
+        /grnh\.se/,
+        /boards\.greenhouse\.io/,
+        /job-boards\.greenhouse\.io/
+      ];
+      for (const pattern of patterns) {
+        if (pattern.test(clean)) {
+          console.log(`[GreenhouseStrategy] ✅ Can handle URL (domain): ${clean}`);
+          return true;
+        }
+      }
+
+      // 2. Greenhouse-specific query params — intentional, on the raw URL
+      //    https://keydatacyber.com/careers?gh_jid=4726983005&gh_src=...
+      if (full.includes('gh_jid=') || full.includes('gh_src=')) {
+        console.log(`[GreenhouseStrategy] ✅ Can handle URL (query params): ${url}`);
         return true;
       }
-    }
 
-    // ✅ 2. Query params — Greenhouse-specific identifiers on custom domains
-    // Example: https://keydatacyber.com/careers?gh_jid=4726983005&gh_src=...
-    const urlLower = url.toLowerCase();
-    if (urlLower.includes('gh_jid=') || urlLower.includes('gh_src=')) {
-      console.log(`[GreenhouseStrategy] ✅ Can handle URL (query params): ${url}`);
-      return true;
-    }
+      // 3. Path substring — fallback
+      if (clean.includes('greenhouse') || clean.includes('grnh.se')) {
+        console.log(`[GreenhouseStrategy] ✅ Can handle URL (path match): ${clean}`);
+        return true;
+      }
 
-    // ✅ 3. Path match — fallback
-    if (urlLower.includes('greenhouse') || urlLower.includes('grnh.se')) {
-      console.log(`[GreenhouseStrategy] ✅ Can handle URL (path match): ${url}`);
-      return true;
+      return false;
     }
-
-    return false;
-  }
 
   /**
    * Check if the given URL is a Greenhouse success page

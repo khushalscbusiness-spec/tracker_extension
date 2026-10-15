@@ -51,13 +51,8 @@ export class iCIMSStrategy extends SubmissionDetectionStrategy {
 
   canHandle(url) {
     if (!url) return false;
-    const urlLower = url.toLowerCase();
-
-    if (urlLower.includes('icims.com')) {
-      return true;
-    }
-
-    return false;
+    const clean = this.cleanUrl(url);
+    return clean.includes('icims.com');
   }
 
   isSuccessPage(url) {

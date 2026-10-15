@@ -90,27 +90,27 @@ export class LeverStrategy extends SubmissionDetectionStrategy {
    * @param {string} url - The URL to check
    * @returns {boolean} True if it's a Lever URL
    */
-  canHandle(url) {
-    // ✅ NULL CHECK
+    canHandle(url) {
     if (!url) return false;
+
+    const clean = this.cleanUrl(url);   // origin + path, no query/hash
 
     const patterns = [
       /lever\.co/,
       /jobs\.lever\.co/
     ];
-
     for (const pattern of patterns) {
-      if (this.matchesDomain(url, pattern)) {
-        console.log(`[LeverStrategy] ✅ Can handle URL: ${url}`);
+      if (pattern.test(clean)) {
+        console.log(`[LeverStrategy] ✅ Can handle URL: ${clean}`);
         return true;
       }
     }
 
-    // Also check if URL contains lever-specific paths
-    const urlLower = url.toLowerCase();
-    if (urlLower.includes('lever') ||
-        urlLower.includes('/apply/') && urlLower.includes('lever')) {
-      console.log(`[LeverStrategy] ✅ Can handle URL (path match): ${url}`);
+    // Path-based substring match — must NOT see the query string,
+    // otherwise LinkedIn URLs with applicantTrackingSystemName=Lever
+    // would falsely match.
+    if (clean.includes('lever')) {
+      console.log(`[LeverStrategy] ✅ Can handle URL (path match): ${clean}`);
       return true;
     }
 

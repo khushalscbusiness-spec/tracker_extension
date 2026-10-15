@@ -70,8 +70,8 @@ export class RippleHireStrategy extends SubmissionDetectionStrategy {
    */
   canHandle(url) {
     if (!url) return false;
-    const urlLower = url.toLowerCase();
-    return urlLower.includes('ripplehire.com');
+    const clean = this.cleanUrl(url);
+    return clean.includes('ripplehire.com');
   }
 
   /**

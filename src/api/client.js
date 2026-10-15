@@ -108,12 +108,32 @@ export class APIClient {
         if (!response.ok) {
           const errorBody = await response.json().catch(() => ({}));
           const message = this._extractErrorMessage(errorBody, response);
+
+          // 401 means the token is expired or invalid. Clear it so
+          // every caller (and the popup's storage-first check) knows
+          // the session is over. Other errors (network, 5xx) keep
+          // the token — Layer 3 might just be restarting.
+          if (response.status === 401) {
+            try {
+              await STORAGE.remove('access_token');
+              await STORAGE.remove('access_token_expires_at');
+            } catch (e) {
+              console.warn('[API] Could not clear token on 401:', e);
+            }
+            this.setToken(null);
+            throw new Error(`401: ${message}`);
+          }
+
           throw new Error(message);
         }
 
         return response.json();
       } catch (error) {
         lastError = error;
+        // Do not retry on 401 — it's a definitive rejection
+        if (error.message && error.message.startsWith('401:')) {
+          throw error;
+        }
         if (attempt < retryAttempts - 1) {
           const delay = this.config.RETRY_DELAY || 1000;
           await new Promise(resolve => setTimeout(resolve, delay * (attempt + 1)));
@@ -148,6 +168,19 @@ export class APIClient {
       if (response.access_token) {
         this.setToken(response.access_token);
         await STORAGE.set('access_token', response.access_token);
+
+        // Decode the JWT to extract its exp claim and store it
+        // alongside the token. checkAuth() and the popup use this
+        // for a cheap local expiry check without a network round-trip.
+        try {
+          const payload = JSON.parse(atob(response.access_token.split('.')[1]));
+          if (payload.exp) {
+            await STORAGE.set('access_token_expires_at', payload.exp * 1000);
+          }
+        } catch (e) {
+          console.warn('[API] Could not decode token exp:', e);
+        }
+
         return response.access_token;
       }
       return null;
@@ -159,6 +192,7 @@ export class APIClient {
 
   async logout() {
     await STORAGE.remove('access_token');
+    await STORAGE.remove('access_token_expires_at');
     this.setToken(null);
   }
 

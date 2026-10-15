@@ -90,26 +90,23 @@ export class DeelStrategy extends SubmissionDetectionStrategy {
    * @returns {boolean} True if it's a Deel URL
    */
   canHandle(url) {
-    // ✅ NULL CHECK
     if (!url) return false;
+
+    const clean = this.cleanUrl(url);
 
     const patterns = [
       /jobs\.deel\.com/,
       /deel\.com/
     ];
-
     for (const pattern of patterns) {
-      if (this.matchesDomain(url, pattern)) {
-        console.log(`[DeelStrategy] ✅ Can handle URL: ${url}`);
+      if (pattern.test(clean)) {
+        console.log(`[DeelStrategy] ✅ Can handle URL: ${clean}`);
         return true;
       }
     }
 
-    // Also check if URL contains deel-specific paths
-    const urlLower = url.toLowerCase();
-    if (urlLower.includes('deel.com') ||
-        urlLower.includes('jobs.deel')) {
-      console.log(`[DeelStrategy] ✅ Can handle URL (path match): ${url}`);
+    if (clean.includes('deel.com') || clean.includes('jobs.deel')) {
+      console.log(`[DeelStrategy] ✅ Can handle URL (path match): ${clean}`);
       return true;
     }
 

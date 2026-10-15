@@ -127,30 +127,29 @@ export class WorkdayStrategy extends SubmissionDetectionStrategy {
    * @param {string} url - The URL to check
    * @returns {boolean} True if it's a Workday URL
    */
-  canHandle(url) {
-    if (!url) return false;
-    const patterns = [
-      /myworkdayjobs\.com/,
-      /workday\.com/,
-      /workday\./
-    ];
+    canHandle(url) {
+      if (!url) return false;
 
-    for (const pattern of patterns) {
-      if (this.matchesDomain(url, pattern)) {
-        console.log(`[WorkdayStrategy] ✅ Can handle URL: ${url}`);
+      const clean = this.cleanUrl(url);
+
+      const patterns = [
+        /myworkdayjobs\.com/,
+        /workday\.com/,
+        /workday\./
+      ];
+      for (const pattern of patterns) {
+        if (pattern.test(clean)) {
+          console.log(`[WorkdayStrategy] ✅ Can handle URL: ${clean}`);
+          return true;
+        }
+      }
+
+      if (clean.includes('workday') || clean.includes('myworkday')) {
+        console.log(`[WorkdayStrategy] ✅ Can handle URL (path match): ${clean}`);
         return true;
       }
-    }
 
-    // Also check if URL contains workday-specific paths
-    const urlLower = url.toLowerCase();
-    if (urlLower.includes('workday') ||
-        urlLower.includes('myworkday')) {
-      console.log(`[WorkdayStrategy] ✅ Can handle URL (path match): ${url}`);
-      return true;
-    }
-
-    return false;
+      return false;
   }
 
   /**

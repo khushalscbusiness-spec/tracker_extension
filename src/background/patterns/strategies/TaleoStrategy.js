@@ -50,13 +50,8 @@ export class TaleoStrategy extends SubmissionDetectionStrategy {
 
   canHandle(url) {
     if (!url) return false;
-    const urlLower = url.toLowerCase();
-
-    if (urlLower.includes('taleo.net')) {
-      return true;
-    }
-
-    return false;
+    const clean = this.cleanUrl(url);
+    return clean.includes('taleo.net');
   }
 
   isSuccessPage(url) {

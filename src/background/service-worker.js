@@ -367,36 +367,53 @@ class ServiceWorker {
         return;
       }
 
-      let redirectUrl = payload.redirectUrl || payload.applyUrl;
+      // ── Determine whether this is an on-site apply or external redirect ──
+      const isOnSiteApply = payload.isOnSiteApply === true;
 
-      if (payload.applyUrl && payload.applyUrl.includes('safety/go?url=')) {
-        try {
-          const urlParams = new URLSearchParams(payload.applyUrl.split('?')[1]);
-          const encodedUrl = urlParams.get('url');
-          if (encodedUrl) {
-            redirectUrl = decodeURIComponent(encodedUrl);
+      // Only unwrap redirect URLs for external applies — on-site apply
+      // never leaves the job board and has no redirect URL.
+      let redirectUrl = null;
+
+      if (!isOnSiteApply) {
+        redirectUrl = payload.redirectUrl || payload.applyUrl;
+
+        if (payload.applyUrl && payload.applyUrl.includes('safety/go?url=')) {
+          try {
+            const urlParams = new URLSearchParams(payload.applyUrl.split('?')[1]);
+            const encodedUrl = urlParams.get('url');
+            if (encodedUrl) {
+              redirectUrl = decodeURIComponent(encodedUrl);
+            }
+          } catch (e) {
+            console.warn('[JobPulse] Could not parse redirect URL:', e);
           }
-        } catch (e) {
-          console.warn('[JobPulse] Could not parse redirect URL:', e);
         }
-      }
 
-      if (!redirectUrl && payload.applyUrl) {
-        redirectUrl = payload.applyUrl;
-      }
+        if (!redirectUrl && payload.applyUrl) {
+          redirectUrl = payload.applyUrl;
+        }
 
-      if (!redirectUrl) {
-        console.warn('[JobPulse] No redirect URL found in apply click');
+        if (!redirectUrl) {
+          console.warn('[JobPulse] No redirect URL found in apply click');
+        }
       }
 
       const applyData = {
         applyUrl: payload.applyUrl,
         redirectUrl: redirectUrl,
         sourceTabId: sender.tab?.id || payload.sourceTabId,
-        applyType: payload.applyType || 'external',
-        applyMethod: payload.applyMethod || 'external_redirect',
+        applyType: isOnSiteApply ? 'on_site_apply' : 'external',
+        applyMethod: isOnSiteApply ? 'on_site_apply' : 'external_redirect',
+        hostBoard: payload.hostBoard || null,
         timestamp: payload.timestamp || Date.now()
       };
+
+      console.log(`[JobPulse] Apply classification:`);
+      console.log(`[JobPulse]   isOnSiteApply: ${isOnSiteApply}`);
+      console.log(`[JobPulse]   applyType: ${applyData.applyType}`);
+      console.log(`[JobPulse]   applyMethod: ${applyData.applyMethod}`);
+      console.log(`[JobPulse]   hostBoard: ${applyData.hostBoard}`);
+      console.log(`[JobPulse]   redirectUrl: ${applyData.redirectUrl}`);
 
       const session = await applicationTracker.handleApplyClick({
         jobData: job,
@@ -412,10 +429,6 @@ class ServiceWorker {
           sessionId: session?.sessionId
         }
       });
-
-      // REMOVED: previous block that called this.apiClient.trackApplyClick(...)
-      // Apply clicks are now tracked exclusively by ApplicationTracker via the
-      // session system. No HTTP call is made to Layer 3 on apply click.
 
       this.broadcastStateUpdate();
       console.log('[JobPulse] ✅ Apply click processed, session:', session?.sessionId);
@@ -511,14 +524,47 @@ class ServiceWorker {
       return { authenticated: false };
     }
 
+    // Local expiry check — cheap, no network needed
+    if (!this.isTokenValid(token)) {
+      console.log('[JobPulse] Token expired locally, clearing');
+      await STORAGE.remove('access_token');
+      await STORAGE.remove('access_token_expires_at');
+      this.apiClient.setToken(null);
+      return { authenticated: false };
+    }
+
     try {
       this.apiClient.setToken(token);
       const user = await this.apiClient.getCurrentUser();
       return { authenticated: true, user };
     } catch (error) {
-      await STORAGE.remove('access_token');
-      this.apiClient.setToken(null);
-      return { authenticated: false };
+      // Only clear the token if the server explicitly said it's invalid.
+      // Network errors, timeouts, and 5xx must NOT delete the token.
+      const message = (error && error.message) || '';
+      const is401 = /\b401\b/.test(message) || /unauthorized/i.test(message);
+
+      if (is401) {
+        console.log('[JobPulse] Token rejected by server (401), clearing');
+        await STORAGE.remove('access_token');
+        await STORAGE.remove('access_token_expires_at');
+        this.apiClient.setToken(null);
+        return { authenticated: false };
+      }
+
+      // Transient failure — keep the token, report as authenticated but user-unknown
+      console.log('[JobPulse] /auth/me transient failure, keeping token:', message);
+      return { authenticated: true, user: null, degraded: true };
+    }
+  }
+
+  isTokenValid(token) {
+    if (!token) return false;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      if (!payload.exp) return true;
+      return Date.now() < payload.exp * 1000;
+    } catch (e) {
+      return false;
     }
   }
 
@@ -540,13 +586,29 @@ class ServiceWorker {
           const token = await this.apiClient.login(message.email, message.password);
           if (token) {
             await STORAGE.set('access_token', token);
+
+            // Decode the JWT to extract its exp claim and store it
+            // alongside the token. The popup and checkAuth() use this
+            // for a cheap local expiry check before hitting the network.
+            try {
+              const payload = JSON.parse(atob(token.split('.')[1]));
+              if (payload.exp) {
+                await STORAGE.set('access_token_expires_at', payload.exp * 1000);
+              }
+            } catch (e) {
+              console.warn('[JobPulse] Could not decode token exp:', e);
+            }
+
             this.apiClient.setToken(token);
             port.postMessage({ type: 'LOGIN_SUCCESS' });
+          } else {
+            port.postMessage({ type: 'LOGIN_ERROR', error: 'Login returned no token' });
           }
         } catch (error) {
           port.postMessage({ type: 'LOGIN_ERROR', error: error.message });
         }
         break;
+
 
       case 'LOGOUT':
         await this.apiClient.logout();
