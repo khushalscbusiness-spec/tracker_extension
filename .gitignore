@@ -10,3 +10,5 @@ node_modules/
 
 # Repo dumps
 repo_dump_*.txt
+
+.idea/
